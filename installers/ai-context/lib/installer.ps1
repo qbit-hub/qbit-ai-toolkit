@@ -4,7 +4,7 @@ $ErrorActionPreference = 'Stop'
 $Script:InstallerRoot = ([System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))).TrimEnd('\','/')
 $Script:ToolkitRoot = ([System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..\..'))).TrimEnd('\','/')
 $Script:InstallerId = 'installer.ai-context'
-$Script:InstallerVersion = '1.2.6'
+$Script:InstallerVersion = '1.2.7'
 $Script:StatePath = '.qbit/toolkit/installed/ai-context.json'
 $Script:BlockBegin = '<!-- qbit-toolkit:ai-context:start -->'
 $Script:BlockEnd = '<!-- qbit-toolkit:ai-context:end -->'
@@ -242,7 +242,7 @@ function Get-Variables([string]$ProjectId,[string]$ProjectDisplayName,[string]$R
     CONTEXT_BRANCH_JSON=(ConvertTo-JsonStringContent $ContextBranch)
     PROJECT_ID_YAML=(ConvertTo-YamlSingleQuoted $ProjectId)
     CONTEXT_REMOTE_YAML=(ConvertTo-YamlSingleQuoted $ContextRemote)
-    BOOTSTRAP_DATE=(Get-Date).ToString('yyyy-MM-dd')
+    BOOTSTRAP_DATE=(Get-Date).ToString('yyyy-MM-dd',[Globalization.CultureInfo]::InvariantCulture)
   }
 }
 
@@ -466,7 +466,7 @@ function Restore-Snapshots([Collections.Generic.List[object]]$Snapshots) {
 function Backup-ModifiedPath([string]$Root,[string]$RelativePath) {
   $Source=Join-UnderRoot $Root $RelativePath
   if (-not (Test-Path -LiteralPath $Source -PathType Leaf)) { return }
-  $Stamp=(Get-Date).ToUniversalTime().ToString('yyyyMMddTHHmmssfffZ')
+  $Stamp=(Get-Date).ToUniversalTime().ToString('yyyyMMddTHHmmssfffZ',[Globalization.CultureInfo]::InvariantCulture)
   $Backup=Join-UnderRoot $Root ('.qbit-toolkit/ai-context/backups/' + $Stamp + '/' + $RelativePath)
   $Parent=Split-Path -Parent $Backup
   if (-not (Test-Path -LiteralPath $Parent)) { New-Item -ItemType Directory -Force -Path $Parent | Out-Null }
@@ -492,7 +492,7 @@ function New-StateObject([string]$Mode,[string]$ProjectId,[string]$RepositoryId,
   [Array]::Sort($SeedPaths,[StringComparer]::Ordinal)
   return [ordered]@{
     schemaVersion='1.0';installerId=$Script:InstallerId;installerVersion=$Script:InstallerVersion;mode=$Mode;projectId=$ProjectId;repositoryId=$RepositoryId
-    contextRemote=$ContextRemote;contextBranch=$ContextBranch;installedAtUtc=(Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+    contextRemote=$ContextRemote;contextBranch=$ContextBranch;installedAtUtc=(Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ',[Globalization.CultureInfo]::InvariantCulture)
     managedFiles=$ManagedFiles;managedBlocks=$ManagedBlocks;seededFiles=$SeedPaths;stateFile=$Script:StatePath
   }
 }

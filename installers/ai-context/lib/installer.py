@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 INSTALLER_ID = "installer.ai-context"
-INSTALLER_VERSION = "1.2.6"
+INSTALLER_VERSION = "1.2.7"
 STATE_PATH = ".qbit/toolkit/installed/ai-context.json"
 BLOCK_BEGIN = "<!-- qbit-toolkit:ai-context:start -->"
 BLOCK_END = "<!-- qbit-toolkit:ai-context:end -->"

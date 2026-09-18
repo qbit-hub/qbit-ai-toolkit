@@ -5,7 +5,7 @@ sidebar_label: Continuity v2
 
 # AI Context Continuity v2
 
-Continuity v2 is the durable project-context model shipped by `installer.ai-context`. The current stable release is `1.2.6`. It is designed for exact continuation of repository work across fresh ChatGPT/Codex sessions, accounts, machines, and temporary offline periods without treating chat history as the source of truth.
+Continuity v2 is the durable project-context model shipped by `installer.ai-context`. The current stable release is `1.2.7`. It is designed for exact continuation of repository work across fresh ChatGPT/Codex sessions, accounts, machines, and temporary offline periods without treating chat history as the source of truth.
 
 ## Scope and authority
 

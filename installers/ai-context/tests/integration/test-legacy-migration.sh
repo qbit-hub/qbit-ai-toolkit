@@ -46,7 +46,7 @@ import json,pathlib,sys
 p=pathlib.Path(sys.argv[1]); d=json.loads(p.read_text()); d['installerVersion']='1.0.2'; p.write_text(json.dumps(d,indent=2)+'\n')
 PY
   bash "$install" --operation update --target "$repo" --format json >/dev/null
-  [[ "$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["installerVersion"])' "$state")" == 1.2.6 ]]
+  [[ "$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["installerVersion"])' "$state")" == 1.2.7 ]]
   bash "$uninstall" --target "$repo" --format json >/dev/null
   grep -q '^# Demo AI Context Entry Point' "$repo/AI_CONTEXT.md"
   ! grep -q '<!-- qbit-toolkit:ai-context:start -->' "$repo/AI_CONTEXT.md"
@@ -97,7 +97,7 @@ t_modified_rejected() {
   [[ $code -eq 4 ]]
 }
 
-run_test 'fresh member seed survives uninstall and version-only update reaches 1.2.6' t_fresh_header
+run_test 'fresh member seed survives uninstall and version-only update reaches 1.2.7' t_fresh_header
 run_test 'legacy manual member rollout migrates only with explicit flag' t_legacy_migration
 run_test 'modified legacy lifecycle is rejected' t_modified_rejected
 if (( failed > 0 )); then printf 'FAIL %d legacy migration test(s) failed; %d passed.\n' "$failed" "$passed" >&2; exit 1; fi

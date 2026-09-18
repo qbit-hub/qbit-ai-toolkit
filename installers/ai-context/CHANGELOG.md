@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.2.7
+
+- Make PowerShell installer-generated dates and backup/state timestamps explicitly Gregorian and culture-invariant, including hosts using `fa-IR` or other non-Gregorian calendars.
+- Add a regression test that forces `fa-IR` culture and verifies bootstrap and installer-state timestamps still use the Gregorian calendar.
+
 ## 1.2.6
 
 - Fix PowerShell 7 checkpoint secret scanning so JSON scalar value types such as auto-materialized `DateTime` timestamps are treated as leaves instead of recursively walking self-referential properties.

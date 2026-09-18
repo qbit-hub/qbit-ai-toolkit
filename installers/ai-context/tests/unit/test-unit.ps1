@@ -36,6 +36,21 @@ Test 'managed file hash normalizes UTF-8 BOM and line endings' {
     Assert ((Get-FileSha256 $Bom) -eq $Expected) 'UTF-8 BOM was not normalized'
   } finally {Remove-Item -LiteralPath $Root -Recurse -Force -ErrorAction SilentlyContinue}
 }
+Test 'PowerShell installer timestamps stay Gregorian under fa-IR culture' {
+  $OriginalCulture=[Threading.Thread]::CurrentThread.CurrentCulture
+  try {
+    [Threading.Thread]::CurrentThread.CurrentCulture=[Globalization.CultureInfo]::GetCultureInfo('fa-IR')
+    $V=Get-Variables 'demo' 'Demo' 'demo-api' 'demo-ai-context' 'https://github.com/example/demo-ai-context.git' 'main'
+    $Spec=New-Spec 'member' $V
+    $State=New-StateObject 'member' 'demo' 'demo-api' 'https://github.com/example/demo-ai-context.git' 'main' $Spec @()
+    $ExpectedLocalYear=[DateTime]::Now.Year.ToString('0000',[Globalization.CultureInfo]::InvariantCulture)
+    $ExpectedUtcYear=[DateTime]::UtcNow.Year.ToString('0000',[Globalization.CultureInfo]::InvariantCulture)
+    Assert ($V.BOOTSTRAP_DATE -like "$ExpectedLocalYear-*") 'bootstrap date used a non-Gregorian calendar'
+    Assert ([string]$State.installedAtUtc -like "$ExpectedUtcYear-*Z") 'installer state timestamp used a non-Gregorian calendar'
+  } finally {
+    [Threading.Thread]::CurrentThread.CurrentCulture=$OriginalCulture
+  }
+}
 Test 'rendered lifecycle exposes audit and forbids automatic rebase' {
   $V=Get-Variables 'demo' 'Demo' 'demo-ai-context' 'demo-ai-context' 'https://github.com/example/demo-ai-context.git' 'main';$S=New-Spec 'central' $V
   $PowerShell=[string]$S.Files['tooling/context-lifecycle.ps1'];$Python=[string]$S.Files['tooling/context-lifecycle.py']
