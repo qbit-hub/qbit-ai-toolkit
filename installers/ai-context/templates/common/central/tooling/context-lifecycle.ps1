@@ -621,6 +621,12 @@ function Assert-NoSecrets {
             return
         }
 
+        # ConvertFrom-Json on PowerShell 7 can materialize ISO timestamps as DateTime.
+        # JSON scalar value types cannot contain nested credential fields and must be
+        # treated as leaves to avoid recursively walking self-referential properties
+        # such as DateTime.Date.Date...
+        if ($Node -is [System.ValueType]) { return }
+
         if ($Node -is [System.Collections.IDictionary]) {
             foreach ($key in $Node.Keys) {
                 if ([string]$key -match $forbiddenKey) {

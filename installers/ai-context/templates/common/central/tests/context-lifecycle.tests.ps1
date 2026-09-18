@@ -6,6 +6,7 @@ $templateLauncher = Join-Path $repoRoot 'templates/member/context.ps1'
 $templateTransferHelper = Join-Path $repoRoot 'templates/member/context-transfer.ps1'
 $centralTool = Join-Path $repoRoot 'tooling/context-lifecycle.ps1'
 $centralContinuityTool = Join-Path $repoRoot 'tooling/context-continuity.ps1'
+$powerShellHost = (Get-Process -Id $PID).Path
 
 function Invoke-Git {
     param([string]$Root, [string[]]$Arguments)
@@ -153,7 +154,7 @@ function Invoke-Launcher {
     $previousErrorActionPreference = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     try {
-        $output = @(& powershell -NoProfile -ExecutionPolicy Bypass -File $Env.Launcher $Action 2>&1)
+        $output = @(& $powerShellHost -NoProfile -ExecutionPolicy Bypass -File $Env.Launcher $Action 2>&1)
         $code = $LASTEXITCODE
     } finally {
         $ErrorActionPreference = $previousErrorActionPreference
@@ -167,7 +168,7 @@ function Invoke-LauncherAllowFailure {
     $previousErrorActionPreference = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     try {
-        $output = @(& powershell -NoProfile -ExecutionPolicy Bypass -File $Env.Launcher $Action 2>&1)
+        $output = @(& $powerShellHost -NoProfile -ExecutionPolicy Bypass -File $Env.Launcher $Action 2>&1)
         $code = $LASTEXITCODE
     } finally {
         $ErrorActionPreference = $previousErrorActionPreference
@@ -914,8 +915,14 @@ $tests += @{ Name = 'cache path traversal outside member repository is rejected'
     } finally { Remove-Item -LiteralPath $env.Base -Recurse -Force -ErrorAction SilentlyContinue }
 } }
 
+$selectedTests = @($tests)
+if (-not [string]::IsNullOrWhiteSpace($env:AI_CONTEXT_TEST_FILTER)) {
+    $selectedTests = @($tests | Where-Object { $_.Name -like "*$($env:AI_CONTEXT_TEST_FILTER)*" })
+    if ($selectedTests.Count -eq 0) { throw "No context lifecycle tests matched AI_CONTEXT_TEST_FILTER." }
+}
+
 $failures = 0
-foreach ($test in $tests) {
+foreach ($test in $selectedTests) {
     try {
         & $test.Run
         Write-Host "PASS $($test.Name)"
@@ -928,4 +935,4 @@ foreach ($test in $tests) {
 if ($failures -gt 0) {
     throw "$failures context lifecycle test(s) failed."
 }
-Write-Host "PASS all $($tests.Count) context lifecycle tests"
+Write-Host "PASS all $($selectedTests.Count) selected context lifecycle tests"

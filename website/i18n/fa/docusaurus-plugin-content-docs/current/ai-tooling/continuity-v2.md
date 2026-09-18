@@ -5,7 +5,7 @@ sidebar_label: Continuity v2
 
 # AI Context Continuity v2
 
-Continuity v2 مدل durable برای نگهداری context پروژه است که توسط `installer.ai-context` ارائه می‌شود. نسخه پایدار فعلی `1.2.5` است. هدف آن این است که کار repository در session، اکانت، ماشین یا دوره آفلاین جدید دقیقاً قابل ادامه باشد، بدون اینکه تاریخچه chat به منبع اصلی حقیقت تبدیل شود.
+Continuity v2 مدل durable برای نگهداری context پروژه است که توسط `installer.ai-context` ارائه می‌شود. نسخه پایدار فعلی `1.2.6` است. هدف آن این است که کار repository در session، اکانت، ماشین یا دوره آفلاین جدید دقیقاً قابل ادامه باشد، بدون اینکه تاریخچه chat به منبع اصلی حقیقت تبدیل شود.
 
 ## محدوده و مرجعیت
 

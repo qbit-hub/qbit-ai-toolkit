@@ -3,6 +3,7 @@ $ErrorActionPreference='Stop'
 $InstallerRoot=(Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $Install=Join-Path $InstallerRoot 'install.ps1'
 $TempRoot=Join-Path ([IO.Path]::GetTempPath()) ('ai-context-installer-e2e-' + [Guid]::NewGuid().ToString('N'))
+$powerShellHost=(Get-Process -Id $PID).Path
 New-Item -ItemType Directory -Force -Path $TempRoot|Out-Null
 function Assert([bool]$Condition,[string]$Message){if(-not $Condition){throw $Message}}
 function WriteUtf8([string]$Path,[string]$Text){$Parent=Split-Path -Parent $Path;if(-not(Test-Path $Parent)){New-Item -ItemType Directory -Force -Path $Parent|Out-Null};[IO.File]::WriteAllText($Path,$Text,[Text.UTF8Encoding]::new($false))}
@@ -10,21 +11,21 @@ function InitRepo([string]$Path){New-Item -ItemType Directory -Force -Path $Path
 try{
   $Bare=Join-Path $TempRoot 'context.git';&git init --bare -q --initial-branch=main $Bare;if($LASTEXITCODE){throw 'bare init failed'}
   $Central=Join-Path $TempRoot 'central';InitRepo $Central;&git -C $Central remote add origin $Bare
-  &powershell -NoProfile -ExecutionPolicy Bypass -File $Install -Operation install -Mode central -Target $Central -ProjectId demo -ProjectDisplayName Demo -RepositoryId demo-ai-context -ContextRemote $Bare -ContextBranch main|Out-Null
+  &$powerShellHost -NoProfile -ExecutionPolicy Bypass -File $Install -Operation install -Mode central -Target $Central -ProjectId demo -ProjectDisplayName Demo -RepositoryId demo-ai-context -ContextRemote $Bare -ContextBranch main|Out-Null
   Assert ($LASTEXITCODE -eq 0) 'central installer failed'
   WriteUtf8 (Join-Path $Central 'repositories/repositories.yaml') "project: demo`nrepositories:`n  demo-api:`n    path: ../member`n    role: application-member`n"
   &git -C $Central add --all;&git -C $Central -c user.name=Test -c user.email=test@example.invalid commit -q -m 'install context';&git -C $Central push -q -u origin main
   Assert ($LASTEXITCODE -eq 0) 'central context push failed'
   $CentralTests=Join-Path $Central 'tests/context-lifecycle.tests.ps1'
-  &powershell -NoProfile -ExecutionPolicy Bypass -File $CentralTests
+  &$powerShellHost -NoProfile -ExecutionPolicy Bypass -File $CentralTests
   Assert ($LASTEXITCODE -eq 0) 'installed central lifecycle regression suite failed'
   $InitialHead=(&git --git-dir $Bare rev-parse refs/heads/main).Trim()
 
   $Member=Join-Path $TempRoot 'member';InitRepo $Member
-  &powershell -NoProfile -ExecutionPolicy Bypass -File $Install -Operation install -Mode member -Target $Member -ProjectId demo -RepositoryId demo-api -ContextRemote $Bare -ContextBranch main|Out-Null
+  &$powerShellHost -NoProfile -ExecutionPolicy Bypass -File $Install -Operation install -Mode member -Target $Member -ProjectId demo -RepositoryId demo-api -ContextRemote $Bare -ContextBranch main|Out-Null
   Assert ($LASTEXITCODE -eq 0) 'member installer failed'
   $Launcher=Join-Path $Member '.ai/context/context.ps1'
-  &powershell -NoProfile -ExecutionPolicy Bypass -File $Launcher start|Out-Null
+  &$powerShellHost -NoProfile -ExecutionPolicy Bypass -File $Launcher start|Out-Null
   Assert ($LASTEXITCODE -eq 0) 'member context start failed'
   $Runtime=Join-Path $Member '.ai-bridge/context-runtime.json';Assert (Test-Path $Runtime) 'runtime context was not generated'
   $Cache=Join-Path $Member '.ai/context/cache/project-context';&git -C $Cache config user.name 'AI Context E2E';&git -C $Cache config user.email 'ai-context-e2e@example.invalid'
@@ -33,7 +34,7 @@ try{
     confirmedFindings=@('Central and member assets were installed from installer.ai-context.');decisions=@();rejectedApproaches=@();validation=@('Start completed and runtime bundle exists.');openQuestions=@();nextAction='Continue.'
   }|ConvertTo-Json -Depth 5
   WriteUtf8 (Join-Path $Member '.ai-bridge/context-checkpoint.json') ($Checkpoint+"`n")
-  &powershell -NoProfile -ExecutionPolicy Bypass -File $Launcher checkpoint|Out-Null
+  &$powerShellHost -NoProfile -ExecutionPolicy Bypass -File $Launcher checkpoint|Out-Null
   Assert ($LASTEXITCODE -eq 0) 'member checkpoint failed'
   $FinalHead=(&git --git-dir $Bare rev-parse refs/heads/main).Trim();Assert ($FinalHead -ne $InitialHead) 'checkpoint did not advance context remote'
   $Generated=(&git --git-dir $Bare ls-tree -r --name-only refs/heads/main -- state/repositories/demo-api.md).Trim();Assert ($Generated -eq 'state/repositories/demo-api.md') 'checkpoint repository state was not pushed'

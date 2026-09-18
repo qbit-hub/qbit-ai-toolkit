@@ -44,6 +44,11 @@ Test 'rendered lifecycle exposes audit and forbids automatic rebase' {
   Assert (-not $PowerShell.Contains("@('rebase'")) 'PowerShell lifecycle still contains automatic rebase command'
   Assert (-not $Python.Contains('["rebase",')) 'Python lifecycle still contains automatic rebase command'
 }
+Test 'PowerShell checkpoint secret scan treats JSON value types as leaves' {
+  $V=Get-Variables 'demo' 'Demo' 'demo-ai-context' 'demo-ai-context' 'https://github.com/example/demo-ai-context.git' 'main';$S=New-Spec 'central' $V
+  $PowerShell=[string]$S.Files['tooling/context-lifecycle.ps1']
+  Assert ($PowerShell.Contains('if ($Node -is [System.ValueType]) { return }')) 'PowerShell lifecycle can recurse into DateTime/value-type properties during secret scanning'
+}
 
 if($Failed -gt 0){throw "$Failed unit test(s) failed; $Passed passed."}
 Write-Host "PASS all $Passed AI Context installer unit tests"

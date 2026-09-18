@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.2.6
+
+- Fix PowerShell 7 checkpoint secret scanning so JSON scalar value types such as auto-materialized `DateTime` timestamps are treated as leaves instead of recursively walking self-referential properties.
+- Run installed Windows lifecycle regression launchers with the same PowerShell host as the parent suite so PowerShell 7 behavior is covered rather than silently falling back to Windows PowerShell 5.1.
+- Add regression coverage for the value-type leaf guard while preserving fail-closed secret detection for string and object payloads.
+
 ## 1.2.5
 
 - Exclude sibling clones of the configured central context remote from read-only fleet audit candidates even when their local directory name differs from the remote repository name.

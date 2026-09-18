@@ -28,7 +28,7 @@ try {
     Assert ($Entry.Contains('`demo-api` is a member repository')) 'repository role seed is missing'
     Assert ($Entry.Contains($Script:BlockBegin)) 'managed lifecycle block is missing'
     $StatePath=Join-Path $Repo '.qbit/toolkit/installed/ai-context.json';$State=ReadUtf8 $StatePath|ConvertFrom-Json;$State.installerVersion='1.0.0';WriteUtf8 $StatePath (($State|ConvertTo-Json -Depth 8)+"`n")
-    $Updated=RunJson @('-Operation','update','-Target',$Repo);Assert ($Updated.Code -eq 0) 'version-only state update failed';$UpdatedState=ReadUtf8 $StatePath|ConvertFrom-Json;Assert ([string]$UpdatedState.installerVersion -eq '1.2.5') 'version-only update did not refresh ownership state'
+    $Updated=RunJson @('-Operation','update','-Target',$Repo);Assert ($Updated.Code -eq 0) 'version-only state update failed';$UpdatedState=ReadUtf8 $StatePath|ConvertFrom-Json;Assert ([string]$UpdatedState.installerVersion -eq '1.2.6') 'version-only update did not refresh ownership state'
     $UninstallOutput=@(& powershell -NoProfile -ExecutionPolicy Bypass -File $Uninstall -Target $Repo -Format json 2>&1);Assert ($LASTEXITCODE -eq 0) "uninstall failed: $($UninstallOutput-join ' ')"
     $After=ReadUtf8 $EntryPath;Assert ($After.StartsWith('# Demo AI Context Entry Point')) 'project-owned AI_CONTEXT header was removed by uninstall';Assert (-not $After.Contains($Script:BlockBegin)) 'managed lifecycle block remained after uninstall'
   }
