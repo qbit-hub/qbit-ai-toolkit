@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.2.8
+
+- Make PowerShell checkpoint session directory and filename timestamps explicitly Gregorian and culture-invariant so non-Gregorian host cultures do not create paths such as `sessions/1405/...`.
+- Extend lifecycle E2E coverage to assert the persisted repository manifest points to a session path under the current Gregorian year.
+
 ## 1.2.7
 
 - Make PowerShell installer-generated dates and backup/state timestamps explicitly Gregorian and culture-invariant, including hosts using `fa-IR` or other non-Gregorian calendars.

@@ -56,7 +56,7 @@
     {
       "id": "installer.ai-context",
       "kind": "installer",
-      "version": "1.2.7",
+      "version": "1.2.8",
       "path": "installers/ai-context",
       "consumers": [
         "shared"

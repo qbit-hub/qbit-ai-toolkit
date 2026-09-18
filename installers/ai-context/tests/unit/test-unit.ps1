@@ -64,6 +64,13 @@ Test 'PowerShell checkpoint secret scan treats JSON value types as leaves' {
   $PowerShell=[string]$S.Files['tooling/context-lifecycle.ps1']
   Assert ($PowerShell.Contains('if ($Node -is [System.ValueType]) { return }')) 'PowerShell lifecycle can recurse into DateTime/value-type properties during secret scanning'
 }
+Test 'PowerShell checkpoint session paths use invariant Gregorian formatting' {
+  $V=Get-Variables 'demo' 'Demo' 'demo-ai-context' 'demo-ai-context' 'https://github.com/example/demo-ai-context.git' 'main';$S=New-Spec 'central' $V
+  $PowerShell=[string]$S.Files['tooling/context-lifecycle.ps1']
+  Assert ($PowerShell.Contains("ToString('yyyy',[Globalization.CultureInfo]::InvariantCulture)")) 'PowerShell lifecycle session year is culture-dependent'
+  Assert ($PowerShell.Contains("ToString('MM',[Globalization.CultureInfo]::InvariantCulture)")) 'PowerShell lifecycle session month is culture-dependent'
+  Assert ($PowerShell.Contains("ToString('yyyy-MM-dd-HHmmss',[Globalization.CultureInfo]::InvariantCulture)")) 'PowerShell lifecycle session filename timestamp is culture-dependent'
+}
 
 if($Failed -gt 0){throw "$Failed unit test(s) failed; $Passed passed."}
 Write-Host "PASS all $Passed AI Context installer unit tests"

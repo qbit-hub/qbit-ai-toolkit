@@ -51,7 +51,7 @@ The catalog currently publishes two stable installers:
 
 ```text
 installer.codex-ai-tooling  1.1.3
-installer.ai-context        1.2.7
+installer.ai-context        1.2.8
 platforms                   Windows, Linux, macOS
 ```
 
@@ -139,7 +139,7 @@ Each catalog asset declares metadata such as:
 - compatibility metadata;
 - optional integrity and release metadata.
 
-The current catalog declares `installer.codex-ai-tooling` `1.1.3` and `installer.ai-context` `1.2.7` as stable installers for Windows, Linux, and macOS.
+The current catalog declares `installer.codex-ai-tooling` `1.1.3` and `installer.ai-context` `1.2.8` as stable installers for Windows, Linux, and macOS.
 
 Schemas live under [`schemas/`](schemas/) and are part of the versioned contract.
 

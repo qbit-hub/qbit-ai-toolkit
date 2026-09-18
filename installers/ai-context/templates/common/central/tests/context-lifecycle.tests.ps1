@@ -454,6 +454,8 @@ $tests += @{ Name = 'v2 tracked checkpoint persists workstream validation ledger
         Assert-True -Condition (Test-Path -LiteralPath (Join-Path $env.Cache 'workstreams/active/landing-polish.json')) -Message 'Tracked workstream must be stored as a durable active workstream.'
         Assert-True -Condition (Test-Path -LiteralPath (Join-Path $env.Cache 'validation/repositories/test-member.json')) -Message 'Validation ledger must be persisted.'
         $manifest = Get-Content -LiteralPath (Join-Path $env.Cache 'manifests/repositories/test-member.json') -Raw | ConvertFrom-Json
+        $expectedSessionYear = [DateTime]::Now.Year.ToString('0000',[Globalization.CultureInfo]::InvariantCulture)
+        Assert-True -Condition ([string]$manifest.session -like "sessions/$expectedSessionYear/*") -Message 'Checkpoint session path must use the Gregorian year regardless of host culture.'
         Assert-True -Condition ($manifest.continuity.workstreamId -eq 'landing-polish') -Message 'Repository manifest must point to the tracked workstream.'
         Assert-True -Condition ($manifest.continuity.currentItemId -eq 'WS-1') -Message 'Repository manifest must persist the execution cursor.'
         Invoke-Launcher -Env $env -Action 'start'

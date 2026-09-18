@@ -819,9 +819,9 @@ if ($Action -eq 'checkpoint') {
     $memberState = Get-GitState -Root $memberRootFullPath
     $now = Get-Date
     $generatedAt = $now.ToString('o')
-    $year = $now.ToString('yyyy')
-    $month = $now.ToString('MM')
-    $stamp = $now.ToString('yyyy-MM-dd-HHmmss')
+    $year = $now.ToString('yyyy',[Globalization.CultureInfo]::InvariantCulture)
+    $month = $now.ToString('MM',[Globalization.CultureInfo]::InvariantCulture)
+    $stamp = $now.ToString('yyyy-MM-dd-HHmmss',[Globalization.CultureInfo]::InvariantCulture)
     $repoId = [string]$config.repository
     $scopeSlug = Get-SafeSlug -Value ([string]$checkpoint.scope)
     $repoSlug = Get-SafeSlug -Value $repoId
