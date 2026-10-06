@@ -21,18 +21,28 @@ if ($Deployment.installerId -ne 'installer.codexpro') {
     throw "Refusing to uninstall unowned state from $StateDir."
 }
 
+[string[]]$SelectedTunnels = if ($Deployment.tunnels) {
+    @($Deployment.tunnels | ForEach-Object { ([string]$_).ToLowerInvariant() })
+}
+elseif ($Deployment.hostname) {
+    @('cloudflare')
+}
+else {
+    @()
+}
+
 function Remove-ManagedProfileBlock {
     param([string]$ProfilePath)
     if (-not $ProfilePath -or -not (Test-Path -LiteralPath $ProfilePath -PathType Leaf)) {
         return
     }
-    $start = '# >>> qbit codexpro >>>'
-    $end = '# <<< qbit codexpro <<<'
-    $current = [IO.File]::ReadAllText($ProfilePath)
-    $pattern = '(?ms)^' + [regex]::Escape($start) + '.*?^' + [regex]::Escape($end) + '\s*'
-    $updated = [regex]::Replace($current, $pattern, '', 1)
-    if ($updated -ne $current) {
-        [IO.File]::WriteAllText($ProfilePath, $updated, $Utf8NoBom)
+    $Start = '# >>> qbit codexpro >>>'
+    $End = '# <<< qbit codexpro <<<'
+    $Current = [IO.File]::ReadAllText($ProfilePath)
+    $Pattern = '(?ms)^' + [regex]::Escape($Start) + '.*?^' + [regex]::Escape($End) + '\s*'
+    $Updated = [regex]::Replace($Current, $Pattern, '', 1)
+    if ($Updated -ne $Current) {
+        [IO.File]::WriteAllText($ProfilePath, $Updated, $Utf8NoBom)
     }
 }
 
@@ -41,24 +51,24 @@ function Remove-InstallerOwnedCodexProPackage {
         return $false
     }
 
-    $managerName = [string]$Deployment.packageManager
-    $managerExecutable = [string]$Deployment.packageManagerExecutable
-    if (-not $managerExecutable -or -not (Test-Path -LiteralPath $managerExecutable -PathType Leaf)) {
-        $resolved = Get-Command $managerName -ErrorAction SilentlyContinue | Select-Object -First 1
-        $managerExecutable = if ($resolved) { $resolved.Source } else { $null }
+    $ManagerName = [string]$Deployment.packageManager
+    $ManagerExecutable = [string]$Deployment.packageManagerExecutable
+    if (-not $ManagerExecutable -or -not (Test-Path -LiteralPath $ManagerExecutable -PathType Leaf)) {
+        $Resolved = Get-Command $ManagerName -ErrorAction SilentlyContinue | Select-Object -First 1
+        $ManagerExecutable = if ($Resolved) { $Resolved.Source } else { $null }
     }
-    if (-not $managerExecutable) {
-        throw "Package manager required to remove installer-owned CodexPro is unavailable: $managerName"
+    if (-not $ManagerExecutable) {
+        throw "Package manager required to remove installer-owned CodexPro is unavailable: $ManagerName"
     }
 
-    switch ($managerName) {
-        'bun'  { & $managerExecutable remove -g codexpro }
-        'npm'  { & $managerExecutable uninstall -g codexpro }
-        'pnpm' { & $managerExecutable remove -g codexpro }
-        default { throw "Unsupported recorded package manager: $managerName" }
+    switch ($ManagerName) {
+        'bun'  { & $ManagerExecutable remove -g codexpro }
+        'npm'  { & $ManagerExecutable uninstall -g codexpro }
+        'pnpm' { & $ManagerExecutable remove -g codexpro }
+        default { throw "Unsupported recorded package manager: $ManagerName" }
     }
     if ($LASTEXITCODE -ne 0) {
-        throw "Failed to remove installer-owned CodexPro with $managerName (exit $LASTEXITCODE)."
+        throw "Failed to remove installer-owned CodexPro with $ManagerName (exit $LASTEXITCODE)."
     }
     return $true
 }
@@ -69,41 +79,42 @@ function Restore-PackagePatch {
     if (-not (Test-Path -LiteralPath $BackupDir -PathType Container)) {
         throw "Recorded CodexPro patch backup is missing: $BackupDir"
     }
-    $metadataPath = Join-Path $BackupDir 'backup.json'
-    if (-not (Test-Path -LiteralPath $metadataPath -PathType Leaf)) {
-        throw "CodexPro patch backup metadata is missing: $metadataPath"
+    $MetadataPath = Join-Path $BackupDir 'backup.json'
+    if (-not (Test-Path -LiteralPath $MetadataPath -PathType Leaf)) {
+        throw "CodexPro patch backup metadata is missing: $MetadataPath"
     }
     if (-not (Test-Path -LiteralPath $PackageDir -PathType Container)) {
         throw "Installed CodexPro package directory is missing: $PackageDir"
     }
-    $packageJsonPath = Join-Path $PackageDir 'package.json'
-    $package = Get-Content -LiteralPath $packageJsonPath -Raw | ConvertFrom-Json
-    if ($package.name -ne 'codexpro' -or $package.version -ne '0.29.0') {
-        throw "Refusing to restore a 0.29.0 backup over $($package.name)@$($package.version)."
+    $PackageJsonPath = Join-Path $PackageDir 'package.json'
+    $Package = Get-Content -LiteralPath $PackageJsonPath -Raw | ConvertFrom-Json
+    if ($Package.name -ne 'codexpro' -or $Package.version -ne '0.29.0') {
+        throw "Refusing to restore a 0.29.0 backup over $($Package.name)@$($Package.version)."
     }
-    $dist = Join-Path $PackageDir 'dist'
-    $serverPath = Join-Path $dist 'server.js'
-    $configPath = Join-Path $dist 'config.js'
-    $bashPath = Join-Path $dist 'bashOps.js'
-    $hostPath = Join-Path $dist 'hostOps.js'
-    $ownedMarkersPresent =
-        (Test-Path -LiteralPath $serverPath -PathType Leaf) -and
-        [IO.File]::ReadAllText($serverPath).Contains('registerCodexTool(config, server, "host_exec"') -and
-        (Test-Path -LiteralPath $configPath -PathType Leaf) -and
-        [IO.File]::ReadAllText($configPath).Contains('CODEXPRO_HOST_EXEC_MODE')
-    if (-not $ownedMarkersPresent -and -not $Force) {
+
+    $Dist = Join-Path $PackageDir 'dist'
+    $ServerPath = Join-Path $Dist 'server.js'
+    $ConfigPath = Join-Path $Dist 'config.js'
+    $BashPath = Join-Path $Dist 'bashOps.js'
+    $HostPath = Join-Path $Dist 'hostOps.js'
+    $OwnedMarkersPresent =
+        (Test-Path -LiteralPath $ServerPath -PathType Leaf) -and
+        [IO.File]::ReadAllText($ServerPath).Contains('registerCodexTool(config, server, "host_exec"') -and
+        (Test-Path -LiteralPath $ConfigPath -PathType Leaf) -and
+        [IO.File]::ReadAllText($ConfigPath).Contains('CODEXPRO_HOST_EXEC_MODE')
+    if (-not $OwnedMarkersPresent -and -not $Force) {
         throw 'Current CodexPro package no longer matches the installer-owned patch. Use -Force only after reviewing the package drift.'
     }
 
-    $backupMetadata = Get-Content -LiteralPath $metadataPath -Raw | ConvertFrom-Json
-    Copy-Item -LiteralPath (Join-Path $BackupDir 'bashOps.js') -Destination $bashPath -Force
-    Copy-Item -LiteralPath (Join-Path $BackupDir 'config.js') -Destination $configPath -Force
-    Copy-Item -LiteralPath (Join-Path $BackupDir 'server.js') -Destination $serverPath -Force
-    if ([bool]$backupMetadata.hostOpsExisted) {
-        Copy-Item -LiteralPath (Join-Path $BackupDir 'hostOps.js') -Destination $hostPath -Force
+    $BackupMetadata = Get-Content -LiteralPath $MetadataPath -Raw | ConvertFrom-Json
+    Copy-Item -LiteralPath (Join-Path $BackupDir 'bashOps.js') -Destination $BashPath -Force
+    Copy-Item -LiteralPath (Join-Path $BackupDir 'config.js') -Destination $ConfigPath -Force
+    Copy-Item -LiteralPath (Join-Path $BackupDir 'server.js') -Destination $ServerPath -Force
+    if ([bool]$BackupMetadata.hostOpsExisted) {
+        Copy-Item -LiteralPath (Join-Path $BackupDir 'hostOps.js') -Destination $HostPath -Force
     }
     else {
-        Remove-Item -LiteralPath $hostPath -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $HostPath -Force -ErrorAction SilentlyContinue
     }
     return $true
 }
@@ -122,22 +133,39 @@ if ([bool]$Deployment.profileManaged -and $PSCmdlet.ShouldProcess([string]$Deplo
     Remove-ManagedProfileBlock -ProfilePath ([string]$Deployment.profilePath)
 }
 
-$LauncherPath = Join-Path $StateDir 'Start-CodexPro.ps1'
-$UrlHelperPath = Join-Path $StateDir 'Get-CodexProConnectorUrl.ps1'
-if ($PSCmdlet.ShouldProcess($LauncherPath, 'restore or remove managed launcher')) {
-    if ($Deployment.previousLauncherBackup -and (Test-Path -LiteralPath ([string]$Deployment.previousLauncherBackup) -PathType Leaf)) {
-        Copy-Item -LiteralPath ([string]$Deployment.previousLauncherBackup) -Destination $LauncherPath -Force
-    }
-    else {
-        Remove-Item -LiteralPath $LauncherPath -Force -ErrorAction SilentlyContinue
+$ManagedAssets = if ($Deployment.managedAssets) {
+    @($Deployment.managedAssets | ForEach-Object { [string]$_ })
+}
+else {
+    @('Start-CodexPro.ps1', 'Get-CodexProConnectorUrl.ps1')
+}
+$PreviousAssetBackups = @{}
+if ($Deployment.previousAssetBackups) {
+    foreach ($Property in $Deployment.previousAssetBackups.PSObject.Properties) {
+        $PreviousAssetBackups[$Property.Name] = [string]$Property.Value
     }
 }
-if ($PSCmdlet.ShouldProcess($UrlHelperPath, 'restore or remove connector URL helper')) {
-    if ($Deployment.previousUrlHelperBackup -and (Test-Path -LiteralPath ([string]$Deployment.previousUrlHelperBackup) -PathType Leaf)) {
-        Copy-Item -LiteralPath ([string]$Deployment.previousUrlHelperBackup) -Destination $UrlHelperPath -Force
+else {
+    if ($Deployment.previousLauncherBackup) {
+        $PreviousAssetBackups['Start-CodexPro.ps1'] = [string]$Deployment.previousLauncherBackup
+    }
+    if ($Deployment.previousUrlHelperBackup) {
+        $PreviousAssetBackups['Get-CodexProConnectorUrl.ps1'] = [string]$Deployment.previousUrlHelperBackup
+    }
+}
+
+foreach ($AssetName in $ManagedAssets) {
+    $AssetPath = Join-Path $StateDir $AssetName
+    if (-not $PSCmdlet.ShouldProcess($AssetPath, 'restore or remove managed CodexPro asset')) {
+        continue
+    }
+
+    $BackupPath = if ($PreviousAssetBackups.ContainsKey($AssetName)) { [string]$PreviousAssetBackups[$AssetName] } else { '' }
+    if ($BackupPath -and (Test-Path -LiteralPath $BackupPath -PathType Leaf)) {
+        Copy-Item -LiteralPath $BackupPath -Destination $AssetPath -Force
     }
     else {
-        Remove-Item -LiteralPath $UrlHelperPath -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $AssetPath -Force -ErrorAction SilentlyContinue
     }
 }
 
@@ -146,16 +174,35 @@ if (-not [bool]$Deployment.tokenWasPresentBefore -and $PSCmdlet.ShouldProcess($T
     Remove-Item -LiteralPath $TokenPath -Force -ErrorAction SilentlyContinue
 }
 
+$TunnelRemoved = $false
 if ($RemoveTunnel) {
-    $Cloudflared = [string]$Deployment.cloudflaredExecutable
-    if (-not (Test-Path -LiteralPath $Cloudflared -PathType Leaf)) {
-        throw "cloudflared is unavailable; cannot remove tunnel $($Deployment.tunnelName)."
+    if ('cloudflare' -notin $SelectedTunnels) {
+        throw '-RemoveTunnel only applies to a configured Cloudflare named tunnel.'
     }
-    if ($PSCmdlet.ShouldProcess([string]$Deployment.tunnelName, 'delete Cloudflare named tunnel')) {
-        & $Cloudflared tunnel delete --force ([string]$Deployment.tunnelName)
+
+    $CloudflareProvider = if ($Deployment.providers -and $Deployment.providers.cloudflare) { $Deployment.providers.cloudflare } else { $null }
+    $Cloudflared = if ($CloudflareProvider -and $CloudflareProvider.executable) {
+        [string]$CloudflareProvider.executable
+    }
+    else {
+        [string]$Deployment.cloudflaredExecutable
+    }
+    $TunnelName = if ($CloudflareProvider -and $CloudflareProvider.tunnelName) {
+        [string]$CloudflareProvider.tunnelName
+    }
+    else {
+        [string]$Deployment.tunnelName
+    }
+
+    if (-not (Test-Path -LiteralPath $Cloudflared -PathType Leaf)) {
+        throw "cloudflared is unavailable; cannot remove tunnel $TunnelName."
+    }
+    if ($PSCmdlet.ShouldProcess($TunnelName, 'delete Cloudflare named tunnel')) {
+        & $Cloudflared tunnel delete --force $TunnelName
         if ($LASTEXITCODE -ne 0) {
-            throw "Failed to delete Cloudflare tunnel $($Deployment.tunnelName). DNS cleanup may still be required in Cloudflare."
+            throw "Failed to delete Cloudflare tunnel $TunnelName. DNS cleanup may still be required in Cloudflare."
         }
+        $TunnelRemoved = $true
     }
 }
 
@@ -164,15 +211,21 @@ if ($PSCmdlet.ShouldProcess($DeploymentPath, 'remove installer ownership state')
 }
 
 Write-Host 'CodexPro installer-owned state was removed.'
-if (-not $RemoveTunnel -and [bool]$Deployment.tunnelConfigured) {
+if (-not $RemoveTunnel -and 'cloudflare' -in $SelectedTunnels -and [bool]$Deployment.tunnelConfigured) {
     Write-Host "Cloudflare tunnel '$($Deployment.tunnelName)' was preserved."
 }
-Write-Host 'Shared dependencies (Git, Codex CLI, package manager, cloudflared) were preserved.'
+if ('openai' -in $SelectedTunnels) {
+    Write-Host 'OpenAI tunnel-client configuration, tunnel id, and runtime key were preserved.'
+}
+if ('ngrok' -in $SelectedTunnels) {
+    Write-Host 'ngrok account configuration and hostname ownership were preserved.'
+}
+Write-Host 'Shared host dependencies were preserved.'
 
 [pscustomobject]@{
     status = 'ok'
     installer = 'installer.codexpro'
-    tunnelRemoved = [bool]$RemoveTunnel
+    tunnelRemoved = $TunnelRemoved
     packageRestored = [bool]$PackageRestored
     packageRemoved = [bool]$PackageRemoved
 } | ConvertTo-Json -Compress

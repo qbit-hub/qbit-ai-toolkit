@@ -1,130 +1,151 @@
-[CmdletBinding()]
-param(
-    [Parameter(Position = 0)]
-    [string]$Root = (Get-Location).Path,
-
-    [ValidateSet('', 'off', 'on-request', 'full-access')]
-    [string]$HostExecMode = '',
-
-    [ValidateSet('', 'auto', 'quic', 'http2')]
-    [string]$TunnelProtocol = ''
-)
-
 $ErrorActionPreference = 'Stop'
-$ConfigFile = Join-Path $PSScriptRoot 'deployment.json'
-$TokenFile = Join-Path $PSScriptRoot 'http-token'
 
+$ConfigFile = Join-Path $PSScriptRoot 'deployment.json'
 if (-not (Test-Path -LiteralPath $ConfigFile -PathType Leaf)) {
     throw "CodexPro deployment configuration not found: $ConfigFile"
 }
-if (-not (Test-Path -LiteralPath $TokenFile -PathType Leaf)) {
-    throw "CodexPro MCP token not found: $TokenFile"
-}
-if (-not (Test-Path -LiteralPath $Root -PathType Container)) {
-    throw "Workspace does not exist: $Root"
-}
-
 $Config = Get-Content -LiteralPath $ConfigFile -Raw | ConvertFrom-Json
-$EffectiveHostExecMode = if ($HostExecMode) { $HostExecMode } else { [string]$Config.hostExecMode }
-$EffectiveTunnelProtocol = if ($TunnelProtocol) { $TunnelProtocol } else { [string]$Config.tunnelProtocol }
-if ($EffectiveHostExecMode -notin @('off', 'on-request', 'full-access')) {
-    throw "Invalid configured host execution mode: $EffectiveHostExecMode"
+
+[string[]]$ConfiguredTunnels = @()
+if ($Config.tunnels) {
+    $ConfiguredTunnels = @($Config.tunnels | ForEach-Object { ([string]$_).ToLowerInvariant() })
 }
-if ($EffectiveTunnelProtocol -notin @('auto', 'quic', 'http2')) {
-    throw "Invalid configured tunnel protocol: $EffectiveTunnelProtocol"
+elseif ($Config.hostname) {
+    $ConfiguredTunnels = @('cloudflare')
+}
+if ($ConfiguredTunnels.Count -eq 0) {
+    throw 'No CodexPro tunnel provider is configured.'
 }
 
-$RequiredPaths = @(
-    [string]$Config.packageDir,
-    [string]$Config.gitBash,
-    [string]$Config.codexExecutable,
-    [string]$Config.codexProExecutable,
-    [string]$Config.cloudflaredExecutable
-)
-foreach ($RequiredPath in $RequiredPaths) {
-    if ([string]::IsNullOrWhiteSpace($RequiredPath) -or -not (Test-Path -LiteralPath $RequiredPath)) {
-        throw "Required CodexPro deployment path is unavailable: $RequiredPath"
+$DefaultTunnel = if ($Config.defaultTunnel) {
+    ([string]$Config.defaultTunnel).ToLowerInvariant()
+}
+else {
+    $ConfiguredTunnels[0]
+}
+
+$Mode = $DefaultTunnel
+$ModeSet = $false
+$Root = (Get-Location).Path
+$RootSet = $false
+$HostExecMode = ''
+$TunnelProtocol = ''
+$NgrokHostname = $null
+
+function Set-Mode {
+    param([Parameter(Mandatory)][string]$Value)
+
+    if ($script:ModeSet -and $script:Mode -ne $Value) {
+        throw 'Choose only one mode: --openai, --cf, or --ngrok.'
     }
+    $script:Mode = $Value
+    $script:ModeSet = $true
 }
 
-$DistDir = Join-Path ([string]$Config.packageDir) 'dist'
-$MarkerChecks = @(
-    @{ Path = Join-Path $DistDir 'bashOps.js'; Marker = 'function sandboxInvocation(config, workspace, cwd, command)' },
-    @{ Path = Join-Path $DistDir 'config.js'; Marker = 'CODEXPRO_HOST_EXEC_MODE' },
-    @{ Path = Join-Path $DistDir 'server.js'; Marker = 'registerCodexTool(config, server, "host_exec"' },
-    @{ Path = Join-Path $DistDir 'hostOps.js'; Marker = 'function requestLocalApproval(request)' }
-)
-foreach ($Check in $MarkerChecks) {
-    if (-not (Test-Path -LiteralPath $Check.Path -PathType Leaf)) {
-        throw "Required patched CodexPro file is missing: $($Check.Path)"
+for ($i = 0; $i -lt $args.Count; $i++) {
+    $Argument = [string]$args[$i]
+
+    if ($Argument -eq '--openai') { Set-Mode 'openai'; continue }
+    if ($Argument -eq '--cf') { Set-Mode 'cloudflare'; continue }
+    if ($Argument -eq '--ngrok') { Set-Mode 'ngrok'; continue }
+
+    if ($Argument -in @('-h', '--help')) {
+        @"
+Usage:
+  cpx [root]
+  cpx [root] --openai
+  cpx [root] --cf
+  cpx [root] --ngrok
+
+Configured: $($ConfiguredTunnels -join ', ')
+Default:    $DefaultTunnel
+
+Options:
+  --root <path>
+  --host-exec-mode <off|on-request|full-access>
+  --tunnel-protocol <auto|quic|http2>      Cloudflare only
+  --ngrok-hostname <hostname>              ngrok only
+  -h, --help
+"@ | Write-Host
+        return
     }
-    if (-not [IO.File]::ReadAllText($Check.Path).Contains($Check.Marker)) {
-        throw "Required CodexPro patch marker is missing from $($Check.Path): $($Check.Marker)"
+
+    if ($Argument -eq '--root') {
+        if ($i + 1 -ge $args.Count) { throw '--root requires a path.' }
+        $i++
+        $Root = [string]$args[$i]
+        $RootSet = $true
+        continue
     }
-}
 
-$McpToken = [IO.File]::ReadAllText($TokenFile).Trim()
-if ($McpToken.Length -ne 64 -or $McpToken -notmatch '^[0-9a-f]{64}$') {
-    throw "CodexPro MCP token is invalid: $TokenFile"
-}
-
-$ResolvedRoot = (Resolve-Path -LiteralPath $Root).Path
-$PathDirs = @(
-    Split-Path -Parent ([string]$Config.gitBash),
-    Split-Path -Parent ([string]$Config.codexExecutable),
-    Split-Path -Parent ([string]$Config.codexProExecutable),
-    Split-Path -Parent ([string]$Config.cloudflaredExecutable)
-) | Where-Object { $_ } | Select-Object -Unique
-
-$PreviousPath = $env:PATH
-$PreviousBashSandbox = $env:CODEXPRO_BASH_SANDBOX
-$PreviousBashExecutable = $env:CODEXPRO_BASH_EXECUTABLE
-$PreviousHostExecMode = $env:CODEXPRO_HOST_EXEC_MODE
-$PreviousTunnelTransportProtocol = $env:TUNNEL_TRANSPORT_PROTOCOL
-
-$env:PATH = (($PathDirs + @($PreviousPath)) -join ';')
-$env:CODEXPRO_BASH_SANDBOX = 'workspace'
-$env:CODEXPRO_BASH_EXECUTABLE = [string]$Config.gitBash
-$env:CODEXPRO_HOST_EXEC_MODE = $EffectiveHostExecMode
-$env:TUNNEL_TRANSPORT_PROTOCOL = $EffectiveTunnelProtocol
-
-$HostExecDescription = switch ($EffectiveHostExecMode) {
-    'full-access' { 'full-access (no per-request approval)' }
-    'on-request' { 'on-request (local approval)' }
-    default { 'off' }
-}
-
-Write-Host "CodexPro workspace:  $ResolvedRoot"
-Write-Host "MCP hostname:        $($Config.hostname)"
-Write-Host "Bash:                $($Config.gitBash)"
-Write-Host "Codex sandbox:       $($Config.codexExecutable)"
-Write-Host "Permission profile:  :workspace"
-Write-Host "Host execution:      $HostExecDescription"
-Write-Host "Tunnel protocol:     $EffectiveTunnelProtocol"
-
-$CodexProArgs = @(
-    'stable',
-    '--root', $ResolvedRoot,
-    '--hostname', [string]$Config.hostname,
-    '--tunnel-name', [string]$Config.tunnelName,
-    '--token', $McpToken,
-    '--agent',
-    '--tool-mode', 'full',
-    '--write', 'workspace',
-    '--bash', 'full',
-    '--log-requests'
-)
-
-try {
-    & ([string]$Config.codexProExecutable) @CodexProArgs
-    if ($LASTEXITCODE -ne 0) {
-        throw "CodexPro exited with code $LASTEXITCODE."
+    if ($Argument -eq '--host-exec-mode') {
+        if ($i + 1 -ge $args.Count) { throw '--host-exec-mode requires a value.' }
+        $i++
+        $HostExecMode = [string]$args[$i]
+        if ($HostExecMode -notin @('off', 'on-request', 'full-access')) {
+            throw "Invalid host execution mode: $HostExecMode"
+        }
+        continue
     }
+
+    if ($Argument -eq '--tunnel-protocol') {
+        if ($i + 1 -ge $args.Count) { throw '--tunnel-protocol requires a value.' }
+        $i++
+        $TunnelProtocol = [string]$args[$i]
+        if ($TunnelProtocol -notin @('auto', 'quic', 'http2')) {
+            throw "Invalid tunnel protocol: $TunnelProtocol"
+        }
+        continue
+    }
+
+    if ($Argument -eq '--ngrok-hostname') {
+        if ($i + 1 -ge $args.Count) { throw '--ngrok-hostname requires a hostname.' }
+        $i++
+        $NgrokHostname = [string]$args[$i]
+        continue
+    }
+
+    if ($Argument.StartsWith('-')) {
+        throw "Unknown cpx option: $Argument"
+    }
+
+    if ($RootSet) {
+        throw "Unexpected positional argument: $Argument"
+    }
+
+    $Root = $Argument
+    $RootSet = $true
 }
-finally {
-    $env:CODEXPRO_BASH_EXECUTABLE = $PreviousBashExecutable
-    $env:CODEXPRO_BASH_SANDBOX = $PreviousBashSandbox
-    $env:CODEXPRO_HOST_EXEC_MODE = $PreviousHostExecMode
-    $env:TUNNEL_TRANSPORT_PROTOCOL = $PreviousTunnelTransportProtocol
-    $env:PATH = $PreviousPath
+
+if ($Mode -notin $ConfiguredTunnels) {
+    throw "CodexPro tunnel provider '$Mode' is not configured. Configured providers: $($ConfiguredTunnels -join ', ')."
+}
+
+switch ($Mode) {
+    'openai' {
+        $Launcher = Join-Path $PSScriptRoot 'Start-CodexPro.openai.ps1'
+        $Parameters = @{ Root = $Root }
+        if ($HostExecMode) { $Parameters.HostExecMode = $HostExecMode }
+        & $Launcher @Parameters
+        return
+    }
+    'cloudflare' {
+        $Launcher = Join-Path $PSScriptRoot 'Start-CodexPro.cloudflare.ps1'
+        $Parameters = @{ Root = $Root }
+        if ($HostExecMode) { $Parameters.HostExecMode = $HostExecMode }
+        if ($TunnelProtocol) { $Parameters.TunnelProtocol = $TunnelProtocol }
+        & $Launcher @Parameters
+        return
+    }
+    'ngrok' {
+        $Launcher = Join-Path $PSScriptRoot 'Start-CodexPro.ngrok.ps1'
+        $Parameters = @{ Root = $Root }
+        if ($HostExecMode) { $Parameters.HostExecMode = $HostExecMode }
+        if ($NgrokHostname) { $Parameters.Hostname = $NgrokHostname }
+        & $Launcher @Parameters
+        return
+    }
+    default {
+        throw "Unsupported CodexPro tunnel provider: $Mode"
+    }
 }

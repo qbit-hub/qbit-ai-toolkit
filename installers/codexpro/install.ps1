@@ -4,9 +4,7 @@ param(
     [ValidateNotNullOrEmpty()]
     [string]$WorkspaceRoot,
 
-    [Parameter(Mandatory)]
-    [ValidatePattern('^(?=.{1,253}$)(?!-)(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}$')]
-    [string]$Hostname,
+    [string]$Hostname = '',
 
     [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$')]
     [string]$TunnelName = 'codexpro-local',
@@ -20,6 +18,25 @@ param(
     [ValidateSet('auto', 'bun', 'npm', 'pnpm')]
     [string]$PackageManager = 'auto',
 
+    [string]$CloudflaredPath = '',
+
+    [ValidateSet('openai', 'cloudflare', 'ngrok')]
+    [string[]]$Tunnels,
+
+    [ValidateSet('', 'openai', 'cloudflare', 'ngrok')]
+    [string]$DefaultTunnel = '',
+
+    [string]$NgrokHostname = '',
+    [string]$NgrokConfigPath = (Join-Path $HOME '.config\ngrok\ngrok.yml'),
+    [string]$NgrokExecutable = '',
+
+    [string]$TunnelClientExecutable = (Join-Path $HOME '.tunnel-client\bin\tunnel-client.exe'),
+    [string]$OpenAITunnelIdFile = (Join-Path $HOME '.tunnel-client\codexpro\tunnel-id.txt'),
+    [string]$OpenAIRuntimeKeyFile = (Join-Path $HOME '.tunnel-client\secrets\runtime.key'),
+    [string]$OpenAITunnelAlias = 'codexpro-laptop',
+    [string]$OpenAITunnelProfile = 'codexpro-laptop',
+    [string]$OpenAIProfileDir = (Join-Path $HOME '.config\tunnel-client'),
+
     [string]$StateDir = (Join-Path $HOME '.codexpro'),
 
     [string]$ProfilePath = ([string]$PROFILE),
@@ -29,15 +46,49 @@ param(
     [switch]$SkipCodexLogin,
     [switch]$Force
 )
-
 $ErrorActionPreference = 'Stop'
-$InstallerVersion = '1.0.0'
+$InstallerVersion = '1.1.0'
 $CodexProVersion = '0.29.0'
 $Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 $InstallerRoot = $PSScriptRoot
 
 if ($env:OS -ne 'Windows_NT') {
-    throw 'installer.codexpro 1.0.0 is Windows-only.'
+    throw 'installer.codexpro 1.1.0 is Windows-only.'
+}
+
+[string[]]$SelectedTunnels = if ($PSBoundParameters.ContainsKey('Tunnels')) {
+    @($Tunnels | ForEach-Object { ([string]$_).ToLowerInvariant() })
+}
+else {
+    @('cloudflare')
+}
+if ($SelectedTunnels.Count -eq 0) {
+    throw 'Select at least one CodexPro tunnel provider: openai, cloudflare, or ngrok.'
+}
+$DuplicateTunnels = @($SelectedTunnels | Group-Object | Where-Object Count -gt 1)
+if ($DuplicateTunnels.Count -gt 0) {
+    throw "Duplicate tunnel provider selection: $($DuplicateTunnels.Name -join ', ')."
+}
+
+$EffectiveDefaultTunnel = if ($DefaultTunnel) { $DefaultTunnel.ToLowerInvariant() } else { $SelectedTunnels[0] }
+if ($EffectiveDefaultTunnel -notin $SelectedTunnels) {
+    throw "Default tunnel '$EffectiveDefaultTunnel' is not selected. Selected providers: $($SelectedTunnels -join ', ')."
+}
+
+$UseOpenAI = 'openai' -in $SelectedTunnels
+$UseCloudflare = 'cloudflare' -in $SelectedTunnels
+$UseNgrok = 'ngrok' -in $SelectedTunnels
+$NeedsHttpToken = $UseCloudflare -or $UseNgrok
+$HostnamePattern = '^(?=.{1,253}$)(?!-)(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}$'
+
+if ($UseCloudflare -and ([string]::IsNullOrWhiteSpace($Hostname) -or $Hostname -notmatch $HostnamePattern)) {
+    throw 'Cloudflare selection requires -Hostname with a valid public DNS hostname.'
+}
+if ($UseNgrok -and ([string]::IsNullOrWhiteSpace($NgrokHostname) -or $NgrokHostname -notmatch $HostnamePattern)) {
+    throw 'ngrok selection requires -NgrokHostname with a valid stable ngrok hostname.'
+}
+if ($SkipTunnelSetup -and -not $UseCloudflare) {
+    throw '-SkipTunnelSetup is a Cloudflare-only compatibility switch and requires cloudflare in -Tunnels.'
 }
 if (-not (Test-Path -LiteralPath $WorkspaceRoot -PathType Container)) {
     throw "WorkspaceRoot does not exist: $WorkspaceRoot"
@@ -315,26 +366,14 @@ function Update-ManagedProfileBlock {
     $start = '# >>> qbit codexpro >>>'
     $end = '# <<< qbit codexpro <<<'
     $LauncherLiteral = $LauncherPath.Replace("'", "''")
-    $block = @"
-$start
-function cpx {
-    [CmdletBinding()]
-    param(
-        [Parameter(Position = 0)]
-        [string]`$Root = (Get-Location).Path,
-        [ValidateSet('', 'off', 'on-request', 'full-access')]
-        [string]`$HostExecMode = '',
-        [ValidateSet('', 'auto', 'quic', 'http2')]
-        [string]`$TunnelProtocol = ''
-    )
-    `$launcher = '$LauncherLiteral'
-    `$arguments = @{ Root = `$Root }
-    if (`$HostExecMode) { `$arguments.HostExecMode = `$HostExecMode }
-    if (`$TunnelProtocol) { `$arguments.TunnelProtocol = `$TunnelProtocol }
-    & `$launcher @arguments
-}
-$end
-"@
+    $block = @(
+        $start
+        'function cpx {'
+        ('    $launcher = ''{0}''' -f $LauncherLiteral)
+        '    & $launcher @args'
+        '}'
+        $end
+    ) -join [Environment]::NewLine
 
     $parent = Split-Path -Parent $ProfilePath
     if ($parent) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
@@ -344,7 +383,7 @@ $end
         $updated = [regex]::Replace($current, $pattern, $block.TrimEnd() + [Environment]::NewLine, 1)
     }
     else {
-        $prefix = if ($current -and -not $current.EndsWith("`n")) { $current + [Environment]::NewLine } else { $current }
+        $prefix = if ($current -and -not $current.EndsWith([Environment]::NewLine)) { $current + [Environment]::NewLine } else { $current }
         $updated = $prefix + $block
     }
     if ($updated -ne $current) {
@@ -354,7 +393,6 @@ $end
         [IO.File]::WriteAllText($ProfilePath, $updated, $Utf8NoBom)
     }
 }
-
 function Ensure-CloudflareTunnel {
     param(
         [Parameter(Mandatory)][string]$Cloudflared,
@@ -400,8 +438,24 @@ if (Test-Path -LiteralPath $ExistingDeploymentPath -PathType Leaf) {
     if ($ExistingDeployment.installerId -and $ExistingDeployment.installerId -ne 'installer.codexpro' -and -not $Force) {
         throw "StateDir is owned by another deployment: $StateDir"
     }
-    if (([string]$ExistingDeployment.hostname -ne $Hostname -or [string]$ExistingDeployment.tunnelName -ne $TunnelName) -and -not $Force) {
-        throw 'Existing deployment uses a different hostname or tunnel name. Re-run with -Force to migrate that deployment intentionally.'
+
+    if ($UseCloudflare -and -not $Force) {
+        $ExistingCloudflareHostname = if ($ExistingDeployment.providers -and $ExistingDeployment.providers.cloudflare) {
+            [string]$ExistingDeployment.providers.cloudflare.hostname
+        }
+        else {
+            [string]$ExistingDeployment.hostname
+        }
+        $ExistingCloudflareTunnelName = if ($ExistingDeployment.providers -and $ExistingDeployment.providers.cloudflare) {
+            [string]$ExistingDeployment.providers.cloudflare.tunnelName
+        }
+        else {
+            [string]$ExistingDeployment.tunnelName
+        }
+        if (($ExistingCloudflareHostname -and $ExistingCloudflareHostname -ne $Hostname) -or
+            ($ExistingCloudflareTunnelName -and $ExistingCloudflareTunnelName -ne $TunnelName)) {
+            throw 'Existing deployment uses a different Cloudflare hostname or tunnel name. Re-run with -Force to migrate it intentionally.'
+        }
     }
 }
 
@@ -431,7 +485,66 @@ elseif ($PackageManager -ne 'auto' -and $ExistingCodexProManager -and $PackageMa
 
 $Manager = Select-PackageManager -Requested $EffectivePackageManager
 $CodexExecutable = Ensure-CodexCli -Manager $Manager
-$CloudflaredExecutable = Ensure-Cloudflared -TargetStateDir $StateDir
+
+$CloudflaredExecutable = ''
+if ($UseCloudflare) {
+    if ($CloudflaredPath) {
+        if (-not (Test-Path -LiteralPath $CloudflaredPath -PathType Leaf)) {
+            throw "Configured cloudflared executable does not exist: $CloudflaredPath"
+        }
+        $CloudflaredExecutable = (Resolve-Path -LiteralPath $CloudflaredPath).Path
+    }
+    else {
+        $CloudflaredExecutable = Ensure-Cloudflared -TargetStateDir $StateDir
+    }
+}
+
+$ResolvedNgrokExecutable = ''
+if ($UseNgrok) {
+    if ($NgrokExecutable) {
+        if (-not (Test-Path -LiteralPath $NgrokExecutable -PathType Leaf)) {
+            throw "Configured ngrok executable does not exist: $NgrokExecutable"
+        }
+        $ResolvedNgrokExecutable = (Resolve-Path -LiteralPath $NgrokExecutable).Path
+    }
+    else {
+        $ResolvedNgrokExecutable = Resolve-CommandPath 'ngrok'
+        if (-not $ResolvedNgrokExecutable) {
+            Ensure-WingetPackage -Id 'Ngrok.Ngrok' -Purpose 'ngrok'
+            $ResolvedNgrokExecutable = Resolve-CommandPath 'ngrok'
+        }
+    }
+    if (-not $ResolvedNgrokExecutable) {
+        throw 'ngrok could not be resolved after installation.'
+    }
+    if (-not (Test-Path -LiteralPath $NgrokConfigPath -PathType Leaf)) {
+        throw "ngrok account configuration was not found: $NgrokConfigPath. Configure ngrok with your own account before rerunning."
+    }
+    & $ResolvedNgrokExecutable config check --config $NgrokConfigPath *> $null
+    if ($LASTEXITCODE -ne 0) {
+        throw "ngrok configuration is invalid: $NgrokConfigPath"
+    }
+}
+
+if ($UseOpenAI) {
+    foreach ($OpenAIAsset in @($TunnelClientExecutable, $OpenAITunnelIdFile, $OpenAIRuntimeKeyFile)) {
+        if ([string]::IsNullOrWhiteSpace($OpenAIAsset) -or -not (Test-Path -LiteralPath $OpenAIAsset -PathType Leaf)) {
+            throw "Required OpenAI Secure MCP Tunnel asset is unavailable: $OpenAIAsset"
+        }
+    }
+    if ([string]::IsNullOrWhiteSpace($OpenAITunnelAlias) -or [string]::IsNullOrWhiteSpace($OpenAITunnelProfile)) {
+        throw 'OpenAI Secure MCP Tunnel alias and runtime profile must be non-empty.'
+    }
+    if (-not (Test-Path -LiteralPath $OpenAIProfileDir -PathType Container)) {
+        throw "OpenAI tunnel profile directory is unavailable: $OpenAIProfileDir"
+    }
+    if ([string]::IsNullOrWhiteSpace([IO.File]::ReadAllText($OpenAITunnelIdFile).Trim())) {
+        throw "OpenAI tunnel id file is empty: $OpenAITunnelIdFile"
+    }
+    if ((Get-Item -LiteralPath $OpenAIRuntimeKeyFile).Length -le 0) {
+        throw "OpenAI runtime key file is empty: $OpenAIRuntimeKeyFile"
+    }
+}
 
 if ($CodexProCommandBefore -and -not $ExistingCodexProVersion) {
     throw "An existing CodexPro executable was found but its version could not be verified safely: $CodexProCommandBefore"
@@ -464,33 +577,70 @@ $TokenWasPresentBefore = if ($ExistingDeployment -and $null -ne $ExistingDeploym
 else {
     Test-Path -LiteralPath $TokenFile -PathType Leaf
 }
-Ensure-Token -TokenPath $TokenFile
+if ($NeedsHttpToken) {
+    Ensure-Token -TokenPath $TokenFile
+}
+elseif ($ExistingDeployment -and -not $TokenWasPresentBefore -and (Test-Path -LiteralPath $TokenFile -PathType Leaf)) {
+    Remove-Item -LiteralPath $TokenFile -Force
+}
 
-$LauncherSource = Join-Path $InstallerRoot 'templates\Start-CodexPro.ps1'
-$UrlHelperSource = Join-Path $InstallerRoot 'templates\Get-CodexProConnectorUrl.ps1'
-$LauncherTarget = Join-Path $StateDir 'Start-CodexPro.ps1'
-$UrlHelperTarget = Join-Path $StateDir 'Get-CodexProConnectorUrl.ps1'
-$PreviousLauncherBackup = if ($ExistingDeployment) { [string]$ExistingDeployment.previousLauncherBackup } else { '' }
-$PreviousUrlHelperBackup = if ($ExistingDeployment) { [string]$ExistingDeployment.previousUrlHelperBackup } else { '' }
-if (-not $ExistingDeployment) {
-    $NeedsAssetBackup = (Test-Path -LiteralPath $LauncherTarget -PathType Leaf) -or (Test-Path -LiteralPath $UrlHelperTarget -PathType Leaf)
-    if ($NeedsAssetBackup) {
-        $AssetBackupDir = Join-Path (Join-Path $StateDir 'backups') ("pre-installer-state-" + (Get-Date -Format 'yyyyMMdd-HHmmss'))
-        New-Item -ItemType Directory -Path $AssetBackupDir -Force | Out-Null
-        if (Test-Path -LiteralPath $LauncherTarget -PathType Leaf) {
-            $PreviousLauncherBackup = Join-Path $AssetBackupDir 'Start-CodexPro.ps1'
-            Copy-Item -LiteralPath $LauncherTarget -Destination $PreviousLauncherBackup
-        }
-        if (Test-Path -LiteralPath $UrlHelperTarget -PathType Leaf) {
-            $PreviousUrlHelperBackup = Join-Path $AssetBackupDir 'Get-CodexProConnectorUrl.ps1'
-            Copy-Item -LiteralPath $UrlHelperTarget -Destination $PreviousUrlHelperBackup
-        }
+$AssetNames = @(
+    'Start-CodexPro.ps1',
+    'Start-CodexPro.openai.ps1',
+    'Start-CodexPro.cloudflare.ps1',
+    'Start-CodexPro.ngrok.ps1',
+    'Get-CodexProConnectorUrl.ps1'
+)
+$PreviouslyOwnedAssets = if ($ExistingDeployment -and $ExistingDeployment.managedAssets) {
+    @($ExistingDeployment.managedAssets | ForEach-Object { [string]$_ })
+}
+elseif ($ExistingDeployment) {
+    @('Start-CodexPro.ps1', 'Get-CodexProConnectorUrl.ps1')
+}
+else {
+    @()
+}
+
+$PreviousAssetBackups = [ordered]@{}
+if ($ExistingDeployment -and $ExistingDeployment.previousAssetBackups) {
+    foreach ($Property in $ExistingDeployment.previousAssetBackups.PSObject.Properties) {
+        $PreviousAssetBackups[$Property.Name] = [string]$Property.Value
     }
 }
-Copy-Item -LiteralPath $LauncherSource -Destination $LauncherTarget -Force
-Copy-Item -LiteralPath $UrlHelperSource -Destination $UrlHelperTarget -Force
+elseif ($ExistingDeployment) {
+    $PreviousAssetBackups['Start-CodexPro.ps1'] = [string]$ExistingDeployment.previousLauncherBackup
+    $PreviousAssetBackups['Get-CodexProConnectorUrl.ps1'] = [string]$ExistingDeployment.previousUrlHelperBackup
+}
 
-if (-not $SkipTunnelSetup) {
+$AssetBackupDir = $null
+foreach ($AssetName in $AssetNames) {
+    $Target = Join-Path $StateDir $AssetName
+    if ((Test-Path -LiteralPath $Target -PathType Leaf) -and
+        $AssetName -notin $PreviouslyOwnedAssets -and
+        -not $PreviousAssetBackups.Contains($AssetName)) {
+        if (-not $AssetBackupDir) {
+            $AssetBackupDir = Join-Path (Join-Path $StateDir 'backups') ("pre-installer-state-" + (Get-Date -Format 'yyyyMMdd-HHmmss'))
+            New-Item -ItemType Directory -Path $AssetBackupDir -Force | Out-Null
+        }
+        $Backup = Join-Path $AssetBackupDir $AssetName
+        Copy-Item -LiteralPath $Target -Destination $Backup
+        $PreviousAssetBackups[$AssetName] = $Backup
+    }
+}
+
+foreach ($AssetName in $AssetNames) {
+    $Source = Join-Path (Join-Path $InstallerRoot 'templates') $AssetName
+    $Target = Join-Path $StateDir $AssetName
+    if (-not (Test-Path -LiteralPath $Source -PathType Leaf)) {
+        throw "Required installer template is missing: $Source"
+    }
+    Copy-Item -LiteralPath $Source -Destination $Target -Force
+}
+
+$LauncherTarget = Join-Path $StateDir 'Start-CodexPro.ps1'
+$UrlHelperTarget = Join-Path $StateDir 'Get-CodexProConnectorUrl.ps1'
+
+if ($UseCloudflare -and -not $SkipTunnelSetup) {
     Ensure-CloudflareTunnel -Cloudflared $CloudflaredExecutable -Name $TunnelName -PublicHostname $Hostname
 }
 
@@ -498,16 +648,47 @@ if (-not $SkipProfileUpdate) {
     Update-ManagedProfileBlock -ProfilePath $ProfilePath -LauncherPath $LauncherTarget
 }
 
+$Providers = [ordered]@{}
+if ($UseOpenAI) {
+    $Providers.openai = [ordered]@{
+        tunnelClient = (Resolve-Path -LiteralPath $TunnelClientExecutable).Path
+        tunnelIdFile = (Resolve-Path -LiteralPath $OpenAITunnelIdFile).Path
+        runtimeKeyFile = (Resolve-Path -LiteralPath $OpenAIRuntimeKeyFile).Path
+        alias = $OpenAITunnelAlias
+        profile = $OpenAITunnelProfile
+        profileDir = [IO.Path]::GetFullPath($OpenAIProfileDir)
+        localPort = 8788
+    }
+}
+if ($UseCloudflare) {
+    $Providers.cloudflare = [ordered]@{
+        hostname = $Hostname
+        tunnelName = $TunnelName
+        tunnelProtocol = $TunnelProtocol
+        executable = $CloudflaredExecutable
+        localPort = 8787
+        provisioned = -not [bool]$SkipTunnelSetup
+    }
+}
+if ($UseNgrok) {
+    $Providers.ngrok = [ordered]@{
+        hostname = $NgrokHostname
+        executable = $ResolvedNgrokExecutable
+        configPath = [IO.Path]::GetFullPath($NgrokConfigPath)
+        localPort = 8789
+    }
+}
+
 $Deployment = [ordered]@{
-    schemaVersion = 1
+    schemaVersion = 2
     installerId = 'installer.codexpro'
     installerVersion = $InstallerVersion
     codexProVersion = $CodexProVersion
     installedAt = (Get-Date).ToString('o')
     workspaceRoot = $ResolvedWorkspace
-    hostname = $Hostname
-    tunnelName = $TunnelName
-    tunnelProtocol = $TunnelProtocol
+    tunnels = $SelectedTunnels
+    defaultTunnel = $EffectiveDefaultTunnel
+    providers = $Providers
     hostExecMode = $HostExecMode
     packageManager = $Manager.Name
     packageManagerExecutable = $Manager.Executable
@@ -516,17 +697,25 @@ $Deployment = [ordered]@{
     codexExecutable = $CodexExecutable
     gitExecutable = $GitState.Git
     gitBash = $GitState.Bash
-    cloudflaredExecutable = $CloudflaredExecutable
-    tunnelConfigured = -not [bool]$SkipTunnelSetup
+
+    hostname = if ($UseCloudflare) { $Hostname } else { '' }
+    tunnelName = if ($UseCloudflare) { $TunnelName } else { '' }
+    tunnelProtocol = if ($UseCloudflare) { $TunnelProtocol } else { '' }
+    cloudflaredExecutable = if ($UseCloudflare) { $CloudflaredExecutable } else { '' }
+    tunnelConfigured = $UseCloudflare -and -not [bool]$SkipTunnelSetup
+
     profileManaged = -not [bool]$SkipProfileUpdate
     profilePath = $ProfilePath
     patchBackupDir = if ($PatchResult.backupDir) { [string]$PatchResult.backupDir } elseif ($ExistingDeployment) { [string]$ExistingDeployment.patchBackupDir } else { '' }
     codexProWasPresentBefore = if ($ExistingDeployment -and $null -ne $ExistingDeployment.codexProWasPresentBefore) { [bool]$ExistingDeployment.codexProWasPresentBefore } else { [bool]$CodexProCommandBefore }
     tokenWasPresentBefore = $TokenWasPresentBefore
-    previousLauncherBackup = $PreviousLauncherBackup
-    previousUrlHelperBackup = $PreviousUrlHelperBackup
+    managedAssets = $AssetNames
+    previousAssetBackups = $PreviousAssetBackups
+    previousLauncherBackup = if ($PreviousAssetBackups.Contains('Start-CodexPro.ps1')) { [string]$PreviousAssetBackups['Start-CodexPro.ps1'] } else { '' }
+    previousUrlHelperBackup = if ($PreviousAssetBackups.Contains('Get-CodexProConnectorUrl.ps1')) { [string]$PreviousAssetBackups['Get-CodexProConnectorUrl.ps1'] } else { '' }
 }
-$DeploymentJson = $Deployment | ConvertTo-Json -Depth 4
+
+$DeploymentJson = $Deployment | ConvertTo-Json -Depth 8
 [IO.File]::WriteAllText($ExistingDeploymentPath, $DeploymentJson, $Utf8NoBom)
 
 $VerifyScript = Join-Path $InstallerRoot 'verify.ps1'
@@ -536,17 +725,18 @@ Write-Host ''
 Write-Host 'CodexPro installation completed.'
 Write-Host "State:       $StateDir"
 Write-Host "Workspace:   $ResolvedWorkspace"
-Write-Host "Hostname:    $Hostname"
-Write-Host "Tunnel:      $TunnelName"
-Write-Host "Transport:   $TunnelProtocol"
+Write-Host "Tunnels:     $($SelectedTunnels -join ', ')"
+Write-Host "Default:     $EffectiveDefaultTunnel"
 Write-Host "Host access: $HostExecMode"
 if (-not $SkipProfileUpdate) {
     Write-Host 'Start:       open a new PowerShell session and run cpx'
 }
 else {
-    Write-Host "Start:       & '$LauncherTarget' -Root '$ResolvedWorkspace'"
+    Write-Host "Start:       & '$LauncherTarget'"
 }
-Write-Host "Connector URL helper (prints a secret): & '$UrlHelperTarget'"
+if ($NeedsHttpToken) {
+    Write-Host "Connector URL helper (explicitly prints a secret): & '$UrlHelperTarget'"
+}
 
 [pscustomobject]@{
     status = 'ok'
@@ -554,8 +744,7 @@ Write-Host "Connector URL helper (prints a secret): & '$UrlHelperTarget'"
     version = $InstallerVersion
     stateDir = $StateDir
     workspaceRoot = $ResolvedWorkspace
-    hostname = $Hostname
-    tunnelName = $TunnelName
-    tunnelProtocol = $TunnelProtocol
+    tunnels = $SelectedTunnels
+    defaultTunnel = $EffectiveDefaultTunnel
     hostExecMode = $HostExecMode
 } | ConvertTo-Json -Compress
