@@ -33,23 +33,130 @@ function Assert-ContinuityStringArray {
     return $items
 }
 
+# Windows PowerShell 5.1 prepends a UTF-8 BOM when piping text to some native
+# applications. Git then tries to hash a path beginning with U+FEFF and the
+# entire batch fails. Write raw UTF-8 without BOM, and concurrently drain both
+# output pipes to prevent deadlock on large repositories.
+function Invoke-ContinuityHashBatch {
+    param([string]$Root, [string[]]$Paths)
+    if ($Paths.Count -eq 0) {
+        return [pscustomobject]@{ ExitCode = 0; Hashes = @() }
+    }
+    $git = (Get-Command git.exe -ErrorAction Stop).Source
+    $start = New-Object System.Diagnostics.ProcessStartInfo
+    $start.FileName = $git
+    $start.Arguments = '-c core.longpaths=true -C "' + $Root + '" hash-object --no-filters --stdin-paths'
+    $start.UseShellExecute = $false
+    $start.CreateNoWindow = $true
+    $start.RedirectStandardInput = $true
+    $start.RedirectStandardOutput = $true
+    $start.RedirectStandardError = $true
+    $process = New-Object System.Diagnostics.Process
+    $process.StartInfo = $start
+    # .NET Framework creates the redirected StandardInput writer using the
+    # process Console.InputEncoding; force a no-BOM encoding before it is made.
+    $previousInputEncoding = [Console]::InputEncoding
+    [Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false)
+    try {
+        [void]$process.Start()
+        $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+        $stderrTask = $process.StandardError.ReadToEndAsync()
+        # --stdin-paths accepts Git C-quoted names. Quote every path so literal
+        # quotes, backslashes and control characters cannot split the batch.
+        $quotedPaths = @($Paths | ForEach-Object {
+            '"' + $_.Replace('\', '\\').Replace('"', '\"').Replace("`n", '\n').Replace("`r", '\r').Replace("`t", '\t') + '"'
+        })
+        $bytes = ([System.Text.UTF8Encoding]::new($false)).GetBytes(($quotedPaths -join "`n") + "`n")
+        $process.StandardInput.BaseStream.Write($bytes, 0, $bytes.Length)
+        $process.StandardInput.Close()
+        if (-not $process.WaitForExit(30000)) { throw 'Timed out hashing source files for the context fingerprint.' }
+        $output = $stdoutTask.GetAwaiter().GetResult()
+        $stderr = $stderrTask.GetAwaiter().GetResult()
+        $hashes = @($output -split "`r?`n" | Where-Object { $_ -ne '' })
+        return [pscustomobject]@{ ExitCode = $process.ExitCode; Hashes = $hashes; ErrorText = $stderr }
+    } finally {
+        if (-not $process.HasExited) { $process.Kill() }
+        $process.Dispose()
+        [Console]::InputEncoding = $previousInputEncoding
+    }
+}
+
+function Invoke-ContinuityGitText {
+    param([string]$Root, [string]$Arguments)
+    # Native pipelines in Windows PowerShell can decode Git's UTF-8 paths using
+    # an OEM encoding. Preserve NUL delimiters and UTF-8 explicitly instead.
+    $start = New-Object System.Diagnostics.ProcessStartInfo
+    $start.FileName = (Get-Command git.exe -ErrorAction Stop).Source
+    $start.Arguments = '-c core.longpaths=true -C "' + $Root + '" ' + $Arguments
+    $start.UseShellExecute = $false
+    $start.CreateNoWindow = $true
+    $start.RedirectStandardOutput = $true
+    $start.RedirectStandardError = $true
+    $start.StandardOutputEncoding = [System.Text.UTF8Encoding]::new($false, $true)
+    $process = New-Object System.Diagnostics.Process
+    $process.StartInfo = $start
+    try {
+        [void]$process.Start()
+        $stdout = $process.StandardOutput.ReadToEndAsync()
+        $stderr = $process.StandardError.ReadToEndAsync()
+        if (-not $process.WaitForExit(30000)) { throw 'Timed out enumerating source state for the context fingerprint.' }
+        $output = $stdout.GetAwaiter().GetResult()
+        $errorText = $stderr.GetAwaiter().GetResult()
+        if ($process.ExitCode -ne 0) { throw 'Unable to enumerate source state for the context fingerprint.' }
+        return $output
+    } finally {
+        if (-not $process.HasExited) { $process.Kill() }
+        $process.Dispose()
+    }
+}
+
 function Get-ContinuityFingerprint {
     param([string]$Root)
-    $head = (Invoke-Git -WorkingDirectory $Root -Arguments @('rev-parse', 'HEAD')).Output
-    $porcelain = (Invoke-Git -WorkingDirectory $Root -Arguments @('status', '--porcelain=v1', '--untracked-files=all')).Output
-    $changed = (Invoke-Git -WorkingDirectory $Root -Arguments @('diff', '--name-only', 'HEAD', '--') -AllowFailure).Output
-    $untracked = (Invoke-Git -WorkingDirectory $Root -Arguments @('ls-files', '--others', '--exclude-standard') -AllowFailure).Output
-    $paths = @((($changed + "`n" + $untracked) -split "`r?`n") | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Sort-Object -Unique)
+    $head = (Invoke-ContinuityGitText -Root $Root -Arguments 'rev-parse HEAD').Trim()
+    $porcelain = Invoke-ContinuityGitText -Root $Root -Arguments 'status --porcelain=v1 -z --untracked-files=all'
+    $changed = Invoke-ContinuityGitText -Root $Root -Arguments 'diff --name-only -z HEAD --'
+    $untracked = Invoke-ContinuityGitText -Root $Root -Arguments 'ls-files -z --others --exclude-standard'
+    $index = Invoke-ContinuityGitText -Root $Root -Arguments 'ls-files --stage -z'
+    $pathSet = [System.Collections.Generic.SortedSet[string]]::new([System.StringComparer]::Ordinal)
+    foreach ($relative in (($changed + $untracked).Split([char]0))) {
+        if ($relative.Length -gt 0) { [void]$pathSet.Add($relative) }
+    }
+    $paths = @($pathSet)
     $parts = New-Object System.Collections.Generic.List[string]
+    $parts.Add('fingerprint-v2')
     $parts.Add("head=$head")
-    $parts.Add($porcelain.Replace("`r`n", "`n"))
+    $parts.Add($porcelain)
+    $parts.Add($index)
+    # Hash every existing path in one process, including Unicode/space names.
+    # A failed batch is not a deletion and must not silently degrade to success.
+    $batch = @($paths | Where-Object {
+        Test-Path -LiteralPath (Join-Path $Root $_) -PathType Leaf
+    })
+    $hashes = [System.Collections.Generic.Dictionary[string,string]]::new([System.StringComparer]::Ordinal)
+    if ($batch.Count -gt 0) {
+        $result = Invoke-ContinuityHashBatch -Root $Root -Paths $batch
+        $values = @($result.Hashes)
+        if ($result.ExitCode -ne 0 -or $values.Count -ne $batch.Count) {
+            throw 'Unable to hash source files for the context fingerprint; source state may have changed during capture.'
+        }
+        for ($i = 0; $i -lt $batch.Count; $i++) {
+            if ([string]$values[$i] -cnotmatch '^(?:[0-9a-f]{40}|[0-9a-f]{64})$') { throw 'Invalid source hash in context fingerprint.' }
+            $hashes[[string]$batch[$i]] = [string]$values[$i]
+        }
+    }
     foreach ($relative in $paths) {
-        $hashed = Invoke-Git -WorkingDirectory $Root -Arguments @('hash-object', '--no-filters', '--', $relative) -AllowFailure
-        $parts.Add("$relative=$(if ($hashed.ExitCode -eq 0) { $hashed.Output } else { 'DELETED' })")
+        $parts.Add($relative)
+        if ($hashes.ContainsKey([string]$relative)) {
+            $parts.Add($hashes[[string]$relative])
+        } else {
+            $parts.Add('DELETED')
+        }
     }
     $sha = [System.Security.Cryptography.SHA256]::Create()
     try {
-        $payload = [System.Text.Encoding]::UTF8.GetBytes(($parts -join "`n"))
+        # Length-prefix fields because porcelain itself contains NUL and file
+        # names can contain newlines on supported filesystems.
+        $payload = [System.Text.Encoding]::UTF8.GetBytes((($parts | ForEach-Object { [string]$_.Length + ':' + $_ }) -join ''))
         return (-join ($sha.ComputeHash($payload) | ForEach-Object { $_.ToString('x2') }))
     } finally {
         $sha.Dispose()
@@ -59,7 +166,7 @@ function Get-ContinuityFingerprint {
 function Read-ContinuityJson {
     param([string]$Path)
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $null }
-    return (Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json)
+    return (Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-Json)
 }
 
 function Get-ContinuityValidationLedgerPath {
@@ -85,7 +192,26 @@ function Get-ContinuityPrevious {
         return [pscustomobject]@{ Manifest = $manifest; Workstream = $null }
     }
     $relative = [string]$manifest.continuity.workstreamPath
-    $workstream = if ([string]::IsNullOrWhiteSpace($relative)) { $null } else { Read-ContinuityJson -Path (Join-Path $ContextRoot $relative) }
+    $workstream = $null
+    if (-not [string]::IsNullOrWhiteSpace($relative)) {
+        # Persisted manifests are input, not permission to read/remove arbitrary
+        # files. Bind the canonical bucket and filename to their declared ID.
+        $id = Assert-ContinuityId -Value $manifest.continuity.workstreamId -Label 'Previous workstream id'
+        $bucket = if ($script:ContinuityTerminalWorkstreamStatuses -contains [string]$manifest.continuity.workstreamStatus) { 'archive' } else { 'active' }
+        if ($relative -cne "workstreams/$bucket/$id.json") { throw 'Previous workstream path must match its canonical bucket and id.' }
+        $current = [IO.Path]::GetFullPath($ContextRoot)
+        foreach ($segment in $relative.Split('/')) {
+            $current = Join-Path $current $segment
+            if (Test-Path -LiteralPath $current) {
+                if (((Get-Item -LiteralPath $current -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'Previous workstream path must not traverse a reparse point.' }
+            }
+        }
+        $workstream = Read-ContinuityJson -Path (Join-Path $ContextRoot $relative)
+        if ($null -eq $workstream -or [string]$workstream.id -cne $id -or
+            [string]$workstream.status -cne [string]$manifest.continuity.workstreamStatus) { throw 'Previous workstream identity/status does not match its manifest.' }
+    } elseif (-not [string]::IsNullOrWhiteSpace([string]$manifest.continuity.workstreamId)) {
+        throw 'Previous workstream manifest declares an id without a canonical path.'
+    }
     return [pscustomobject]@{ Manifest = $manifest; Workstream = $workstream }
 }
 
@@ -217,6 +343,38 @@ function Assert-ContinuityCheckpointShape {
     }
 }
 
+function Get-ContinuityGlobalWorkstream {
+    param([string]$ContextRoot, [string]$Id, [string]$Repository)
+    $safeId = Assert-ContinuityId -Value $Id -Label 'Workstream id'
+    $found = @()
+    foreach ($bucket in @('active','archive')) {
+        $relative = "workstreams/$bucket/$safeId.json"
+        $path = [IO.Path]::GetFullPath($ContextRoot)
+        foreach ($segment in $relative.Split('/')) {
+            $path = Join-Path $path $segment
+            if ((Test-Path -LiteralPath $path) -and
+                (((Get-Item -LiteralPath $path -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)) {
+                throw 'Global workstream path must not traverse a reparse point.'
+            }
+        }
+        $record = Read-ContinuityJson -Path $path
+        if ($null -eq $record) { continue }
+        if ([string]$record.id -cne $safeId -or (Get-ContinuityWorkstreamRelativePath -Workstream $record) -cne $relative) {
+            throw 'Global workstream identity/status does not match its canonical path.'
+        }
+        # A globally stable ID has one publishing owner. Other repositories may
+        # be collaborators, but their own checkpoint cannot silently replace it.
+        if (-not ($record.PSObject.Properties.Name -contains 'lastCheckpoint') -or
+            [string]$record.lastCheckpoint.repository -cne $Repository) {
+            throw 'Global workstream id belongs to another checkpoint owner; preserve it and use an explicitly reviewed distinct id.'
+        }
+        $found += $record
+    }
+    if ($found.Count -gt 1) { throw 'Global workstream id exists in both active and archive; manual reconciliation is required.' }
+    if ($found.Count -eq 1) { return $found[0] }
+    return $null
+}
+
 function Assert-ContinuityTransition {
     param([string]$ContextRoot, [object]$Checkpoint, [string]$Repository)
     if ([int]$Checkpoint.schemaVersion -eq 2) {
@@ -227,6 +385,18 @@ function Assert-ContinuityTransition {
         if ($duplicates.Count -gt 0) { throw ('Validation ledger entry ids are immutable and already exist: ' + ($duplicates -join ', ')) }
     }
     $previous = Get-ContinuityPrevious -ContextRoot $ContextRoot -Repository $Repository
+    if ([int]$Checkpoint.schemaVersion -eq 2 -and $null -ne $Checkpoint.continuity.workstream) {
+        $target = Get-ContinuityGlobalWorkstream -ContextRoot $ContextRoot -Id ([string]$Checkpoint.continuity.workstream.id) -Repository $Repository
+        if ($null -ne $target) {
+            if ($null -ne $previous.Workstream -and [string]$previous.Workstream.id -cne [string]$target.id -and
+                (Test-ContinuityWorkstreamUnresolved -Workstream $previous.Workstream)) {
+                throw 'Cannot switch workstream ids while the previous tracked workstream still has unresolved items.'
+            }
+            # Even after a snapshot or a different cursor, the global record is
+            # transition authority for this ID; an old archive cannot be reopened.
+            $previous = [pscustomobject]@{ Manifest = $previous.Manifest; Workstream = $target }
+        }
+    }
     if ($null -eq $previous.Workstream) { return }
     if ([int]$Checkpoint.schemaVersion -eq 1) {
         if (Test-ContinuityWorkstreamUnresolved -Workstream $previous.Workstream) { throw 'Legacy schemaVersion 1 checkpoint would lose an active tracked workstream; use schemaVersion 2 and carry every work item forward.' }
@@ -270,6 +440,9 @@ function Write-ContinuityState {
     param([string]$ContextRoot, [object]$Checkpoint, [object]$MemberState, [string]$GeneratedAt, [string]$SessionRelative)
     if ([int]$Checkpoint.schemaVersion -ne 2) { return [pscustomobject]@{ Metadata = $null; Paths = @() } }
     $repository = [string]$Checkpoint.repository
+    # Validate previous provenance before any ledger or Workstream writes.
+    $previous = Get-ContinuityPrevious -ContextRoot $ContextRoot -Repository $repository
+    $previousRelative = if ($null -ne $previous.Manifest -and $previous.Manifest.PSObject.Properties.Name -contains 'continuity') { [string]$previous.Manifest.continuity.workstreamPath } else { '' }
     $ledgerRelative = Get-ContinuityValidationLedgerPath -Repository $repository
     $ledger = Get-ContinuityValidationLedger -ContextRoot $ContextRoot -Repository $repository
     $entries = @()
@@ -285,8 +458,6 @@ function Write-ContinuityState {
     Write-ContinuityJson -Path (Join-Path $ContextRoot $ledgerRelative) -Value $ledgerOut
     $paths = @($ledgerRelative)
 
-    $previous = Get-ContinuityPrevious -ContextRoot $ContextRoot -Repository $repository
-    $previousRelative = if ($null -ne $previous.Manifest -and $previous.Manifest.PSObject.Properties.Name -contains 'continuity') { [string]$previous.Manifest.continuity.workstreamPath } else { '' }
     $workstream = $Checkpoint.continuity.workstream
     $workstreamRelative = $null
     if ($null -ne $workstream) {
@@ -299,7 +470,13 @@ function Write-ContinuityState {
         Write-ContinuityJson -Path (Join-Path $ContextRoot $workstreamRelative) -Value $storedWorkstream
         $paths += $workstreamRelative
     }
-    if (-not [string]::IsNullOrWhiteSpace($previousRelative) -and $previousRelative -ne $workstreamRelative) {
+    # Only the same Workstream's explicit active -> archive transition retires
+    # its active file. Completed archives remain durable after future snapshots
+    # and new Workstreams; changing the current cursor never deletes history.
+    if ($null -ne $previous.Workstream -and $null -ne $workstream -and
+        [string]$previous.Workstream.id -ceq [string]$workstream.id -and
+        $previousRelative -ceq "workstreams/active/$($workstream.id).json" -and
+        $workstreamRelative -ceq "workstreams/archive/$($workstream.id).json") {
         $previousPath = Join-Path $ContextRoot $previousRelative
         if (Test-Path -LiteralPath $previousPath -PathType Leaf) {
             Remove-Item -LiteralPath $previousPath -Force

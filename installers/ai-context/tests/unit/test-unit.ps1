@@ -15,6 +15,19 @@ Test 'member templates render without unresolved placeholders' {
   $V=Get-Variables 'demo' 'Demo' 'demo-api' 'demo-ai-context' 'https://github.com/example/demo-ai-context.git' 'main';$S=New-Spec 'member' $V
   foreach($Text in @($S.Files.Values)+@($S.Blocks.Values|%{$_.Content})+@($S.Seeds.Values)){Assert (-not ([string]$Text -match '\{\{[A-Z0-9_]+\}\}')) 'unresolved member placeholder'}
 }
+Test 'member installed strict Windows continuity sync gate and mandatory entrypoint' {
+  $V=Get-Variables 'demo' 'Demo' 'demo-api' 'demo-ai-context' 'https://github.com/example/demo-ai-context.git' 'main'
+  $Member=New-Spec 'member' $V
+  $Central=New-Spec 'central' $V
+  Assert ($Member.Files.ContainsKey('.ai/context/context-sync-gate.ps1')) 'member missing sync gate'
+  Assert ($Central.Files.ContainsKey('templates/member/context-sync-gate.ps1')) 'central missing member sync gate'
+  Assert ($Member.Files['.ai/context/context-sync-gate.ps1'] -eq $Central.Files['templates/member/context-sync-gate.ps1']) 'central and member gate drift'
+  $Block=[string]$Member.Blocks['AGENTS.md'].Content
+  Assert ($Block.Contains('context-sync-gate.ps1 -MemberPath . -Mode Start')) 'member Start instructions bypass strict gate'
+  Assert ($Block.Contains('context-sync-gate.ps1 -MemberPath . -Mode Checkpoint')) 'member Checkpoint instructions bypass strict gate'
+  Assert ($Block.Contains('CONTEXT_UNSYNCED')) 'member instruction missing failure state'
+}
+
 Test 'central templates render without unresolved placeholders' {
   $V=Get-Variables 'demo' 'Demo' 'demo-ai-context' 'demo-ai-context' 'https://github.com/example/demo-ai-context.git' 'main';$S=New-Spec 'central' $V
   foreach($Text in @($S.Files.Values)+@($S.Blocks.Values|%{$_.Content})+@($S.Seeds.Values)){Assert (-not ([string]$Text -match '\{\{[A-Z0-9_]+\}\}')) 'unresolved central placeholder'}

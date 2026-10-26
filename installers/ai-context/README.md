@@ -1,6 +1,6 @@
 # AI Context Lifecycle installer
 
-`installer.ai-context` installs the zero-touch AI context lifecycle as a versioned toolkit asset. The current stable release is `1.2.8`; Continuity v2 is supported on Windows, Linux, and macOS in two modes:
+`installer.ai-context` installs the zero-touch AI context lifecycle as a versioned toolkit asset. The release candidate prepared in this worktree is `1.2.9` (uncommitted and not yet rolled out); the previous published stable version is `1.2.8`; Continuity v2 is supported on Windows, Linux, and macOS in two modes:
 
 - `member`: installs repository launchers/config plus managed lifecycle blocks in `AGENTS.md`, `AI_CONTEXT.md`, `.gitignore`, and `.ai-bridge/.gitignore`.
 - `central`: installs the canonical lifecycle engines, member launcher templates, checkpoint schema, regression suites, and automation documentation. It seeds project continuity files only when absent; seeded continuity becomes project-owned immediately and is never overwritten or removed by installer update/uninstall.
@@ -91,6 +91,28 @@ The replace policy permits replacing a modified installer-owned file/block after
 Legacy migration is explicit and fail-closed. It accepts only the recognized pre-installer lifecycle sections plus a semantically equivalent member `config.json`; unknown or modified legacy content remains a conflict. During migration, repository-specific `AI_CONTEXT.md` role text is preserved while the lifecycle/authority tail becomes an installer-managed block.
 
 State is written last to `.qbit/toolkit/installed/ai-context.json`. Mutations snapshot touched files and restore byte-exact content if a write fails. Managed paths reject path traversal and symlink/reparse-point escapes.
+
+## Strict Windows synchronization gate (prepared 1.2.9)
+
+After a reviewed member installation/update, the Windows gate is installed at `.ai/context/context-sync-gate.ps1` and referenced by the managed agent instructions:
+
+```powershell
+# Executed from the owning member repository root before substantive work:
+powershell -NoProfile -ExecutionPolicy Bypass -File .ai/context/context-sync-gate.ps1 -MemberPath . -Mode Start
+
+# Current-source checkpoint verification for local build and pre-merge gates:
+powershell -NoProfile -ExecutionPolicy Bypass -File .ai/context/context-sync-gate.ps1 -MemberPath . -Mode Verify
+
+# Executed after writing a validated Continuity v2 checkpoint payload:
+powershell -NoProfile -ExecutionPolicy Bypass -File .ai/context/context-sync-gate.ps1 -MemberPath . -Mode Checkpoint
+```
+
+Start requires fresh runtime/member identity, canonical cache origin, clean cache and live remote equality. `Status` probes existing runtime/cache/remote health without mutation and emits `CONTEXT_STATUS_OK`; it does not accept a milestone. `Verify` regenerates current source evidence through lifecycle status and requires an exact published Continuity v2 checkpoint: owning Manifest/state/new Session publication commit, operation ID, complete payload digest, source HEAD/branch/dirty/fingerprint/Worktree identity, and Tracked cursor/session consistency. It refreshes ignored cache/runtime state and can fetch/fast-forward a clean cache; it does not stage or write member source.
+
+`Checkpoint` publishes and verifies that same chain. An exact interrupted/completed operation can safely replay without duplicate sessions or an extra commit. A new operation creates a unique GUID Session and fails closed on unrelated publication, stale evidence, source/payload races, forged journal scope or conflicting writers. Failure exits **3 / CONTEXT_UNSYNCED**, preserving source, payload, journal and Git histories. Old fingerprints become historical after `fingerprint-v2`; obtain a fresh reviewed checkpoint after upgrade.
+
+The [operating and recovery contract](docs/continuity-guarantee.md) documents installation, strict closeout, interrupted publication, independent recovery and preservation boundaries.
+**Important limits:** this is a fail-closed **command gate**, not an automatically invoked OS/Codex Desktop hook. An agent can still skip commands until the installed host's workflow enforces them. The strict gate is Windows-only in this candidate; POSIX uses the existing lifecycle but does not yet have equivalent strict remote-head evidence. Do not claim guaranteed cross-platform or all-member rollout until those separate acceptance gates pass.
 
 ## Runtime lifecycle
 

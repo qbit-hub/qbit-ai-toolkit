@@ -13,7 +13,7 @@ function Invoke-Git {
     $previousErrorActionPreference = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     try {
-        $output = @(& git -C $Root @Arguments 2>&1)
+        $output = @(& git -c core.longpaths=true -C $Root @Arguments 2>&1)
         $code = $LASTEXITCODE
     } finally {
         $ErrorActionPreference = $previousErrorActionPreference
@@ -61,10 +61,10 @@ function New-TestEnvironment {
     $memberClone = Join-Path $base 'member-clone'
 
     New-Item -ItemType Directory -Path $base -Force | Out-Null
-    & git init --bare --initial-branch=main $contextBare | Out-Null
+    & git -c core.longpaths=true init --bare --initial-branch=main $contextBare | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'Unable to initialize context bare repo.' }
 
-    & git init --initial-branch=main $contextSeed | Out-Null
+    & git -c core.longpaths=true init --initial-branch=main $contextSeed | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'Unable to initialize context seed repo.' }
     Initialize-GitIdentity -Root $contextSeed
 
@@ -93,9 +93,9 @@ function New-TestEnvironment {
     Invoke-Git -Root $contextSeed -Arguments @('remote', 'add', 'origin', $contextBare) | Out-Null
     Invoke-Git -Root $contextSeed -Arguments @('push', '-u', 'origin', 'main') | Out-Null
 
-    & git init --bare --initial-branch=main $memberBare | Out-Null
+    & git -c core.longpaths=true init --bare --initial-branch=main $memberBare | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'Unable to initialize member bare repo.' }
-    & git init --initial-branch=main $memberSeed | Out-Null
+    & git -c core.longpaths=true init --initial-branch=main $memberSeed | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'Unable to initialize member seed repo.' }
     Initialize-GitIdentity -Root $memberSeed
 
@@ -132,7 +132,7 @@ function New-TestEnvironment {
     Invoke-Git -Root $memberSeed -Arguments @('remote', 'add', 'origin', $memberBare) | Out-Null
     Invoke-Git -Root $memberSeed -Arguments @('push', '-u', 'origin', 'main') | Out-Null
 
-    & git clone $memberBare $memberClone | Out-Null
+    & git -c core.longpaths=true clone $memberBare $memberClone | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'Unable to clone member test repo.' }
     Initialize-GitIdentity -Root $memberClone
 
@@ -288,7 +288,7 @@ $tests += @{ Name = 'clean cache origin migrates to a newly configured remote'; 
     try {
         Invoke-Launcher -Env $env -Action 'start'
         $replacementBare = Join-Path $env.Base 'replacement-context.git'
-        & git clone --bare $env.ContextBare $replacementBare | Out-Null
+        & git -c core.longpaths=true clone --bare $env.ContextBare $replacementBare | Out-Null
         if ($LASTEXITCODE -ne 0) { throw 'Unable to create replacement context remote.' }
 
         $configPath = Join-Path $env.MemberClone '.ai/context/config.json'
@@ -307,7 +307,7 @@ $tests += @{ Name = 'dirty cache refuses automatic origin migration'; Run = {
     try {
         Invoke-Launcher -Env $env -Action 'start'
         $replacementBare = Join-Path $env.Base 'replacement-context.git'
-        & git clone --bare $env.ContextBare $replacementBare | Out-Null
+        & git -c core.longpaths=true clone --bare $env.ContextBare $replacementBare | Out-Null
         if ($LASTEXITCODE -ne 0) { throw 'Unable to create replacement context remote.' }
 
         Set-Content -LiteralPath (Join-Path $env.Cache 'local-dirty-marker.txt') -Value 'preserve me' -Encoding UTF8
@@ -426,7 +426,7 @@ $tests += @{ Name = 'checkpoint writes repository scoped artifacts commits and p
         Assert-True -Condition (Test-Path -LiteralPath (Join-Path $env.Cache 'handoffs/repositories/test-member.md')) -Message 'Repository handoff should be generated.'
         Assert-True -Condition (Test-Path -LiteralPath (Join-Path $env.Cache 'manifests/repositories/test-member.json')) -Message 'Repository manifest should be generated.'
         $localHead = Invoke-Git -Root $env.Cache -Arguments @('rev-parse', 'HEAD')
-        $remoteHead = (& git --git-dir $env.ContextBare rev-parse refs/heads/main).Trim()
+        $remoteHead = (& git -c core.longpaths=true --git-dir $env.ContextBare rev-parse refs/heads/main).Trim()
         Assert-True -Condition ($localHead -eq $remoteHead) -Message 'Checkpoint commit must be pushed to context remote.'
     } finally { Remove-Item -LiteralPath $env.Base -Recurse -Force -ErrorAction SilentlyContinue }
 } }
@@ -567,7 +567,17 @@ $tests += @{ Name = 'v2 duplicate validation ledger id is rejected'; Run = {
         Write-TrackedCheckpoint -Env $env
         Invoke-Launcher -Env $env -Action 'checkpoint'
         $before = Invoke-Git -Root $env.Cache -Arguments @('rev-parse', 'HEAD')
+        $originalManifest = Get-Content -LiteralPath (Join-Path $env.Cache 'manifests/repositories/test-member.json') -Raw | ConvertFrom-Json
         Write-TrackedCheckpoint -Env $env -ValidationId 'VAL-1'
+        Invoke-Launcher -Env $env -Action 'checkpoint'
+        $retriedManifest = Get-Content -LiteralPath (Join-Path $env.Cache 'manifests/repositories/test-member.json') -Raw | ConvertFrom-Json
+        $retriedLedger = Get-Content -LiteralPath (Join-Path $env.Cache 'validation/repositories/test-member.json') -Raw | ConvertFrom-Json
+        Assert-True -Condition ((Invoke-Git -Root $env.Cache -Arguments @('rev-parse', 'HEAD')) -eq $before) -Message 'Exact payload/source retry must not create another commit.'
+        Assert-True -Condition ($retriedManifest.session -eq $originalManifest.session -and @($retriedLedger.entries).Count -eq 1) -Message 'Exact retry must retain one Session and one immutable validation entry.'
+        Write-TrackedCheckpoint -Env $env -ValidationId 'VAL-1'
+        $differentCheckpoint = Get-Content -LiteralPath $env.Checkpoint -Raw | ConvertFrom-Json
+        $differentCheckpoint.objective = 'A different logical milestone must not reuse VAL-1.'
+        $differentCheckpoint | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $env.Checkpoint -Encoding UTF8
         $result = Invoke-LauncherAllowFailure -Env $env -Action 'checkpoint'
         Assert-True -Condition ($result.ExitCode -ne 0) -Message 'Duplicate immutable validation id must fail.'
         Assert-True -Condition ($result.Output -like '*immutable and already exist*VAL-1*') -Message 'Duplicate validation rejection must identify the id.'
@@ -635,6 +645,57 @@ $tests += @{ Name = 'v2 completed workstream moves from active to archive'; Run 
         Assert-True -Condition ($manifest.continuity.workstreamStatus -eq 'COMPLETED') -Message 'Manifest must record terminal workstream status.'
         Assert-True -Condition ($manifest.continuity.workstreamPath -eq 'workstreams/archive/landing-polish.json') -Message 'Manifest must point to archived workstream.'
         Assert-True -Condition ($null -eq $manifest.continuity.currentItemId) -Message 'Completed workstream must clear current item.'
+        $archivePath = Join-Path $env.Cache 'workstreams/archive/landing-polish.json'
+        $archiveHash = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash
+        [ordered]@{
+            schemaVersion = 2; repository = 'test-member'; scope = 'after-archive'; status = 'VALIDATED'
+            objective = 'Record a later snapshot without deleting historical work.'; confirmedFindings = @(); decisions = @(); rejectedApproaches = @()
+            validation = @(); openQuestions = @(); nextAction = 'Start the next Workstream.'
+            continuity = [ordered]@{ mode = 'snapshot'; workstream = $null; validationLedger = @() }
+        } | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $env.Checkpoint -Encoding UTF8
+        Invoke-Launcher -Env $env -Action 'checkpoint'
+        Assert-True -Condition ((Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash -eq $archiveHash) -Message 'A later snapshot must retain archived Workstream bytes.'
+        Write-TrackedCheckpoint -Env $env -ValidationId 'VAL-4'
+        $nextWorkstream = Get-Content -LiteralPath $env.Checkpoint -Raw | ConvertFrom-Json
+        $nextWorkstream.continuity.workstream.id = 'next-workstream'
+        $nextWorkstream | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $env.Checkpoint -Encoding UTF8
+        Invoke-Launcher -Env $env -Action 'checkpoint'
+        Assert-True -Condition ((Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash -eq $archiveHash) -Message 'A new active Workstream must retain old archived Workstream bytes.'
+        Assert-True -Condition (Test-Path -LiteralPath (Join-Path $env.Cache 'workstreams/active/next-workstream.json')) -Message 'New active Workstream should coexist with prior archive.'
+    } finally { Remove-Item -LiteralPath $env.Base -Recurse -Force -ErrorAction SilentlyContinue }
+} }
+
+$tests += @{ Name = 'v2 malformed previous Workstream paths reject without mutation'; Run = {
+    $env = New-TestEnvironment -Name 'v2-invalid-previous-path'
+    try {
+        Invoke-Launcher -Env $env -Action 'start'
+        Initialize-GitIdentity -Root $env.Cache
+        Write-TrackedCheckpoint -Env $env
+        Invoke-Launcher -Env $env -Action 'checkpoint'
+        . $centralContinuityTool
+        $manifestPath = Join-Path $env.Cache 'manifests/repositories/test-member.json'
+        $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+        $activePath = Join-Path $env.Cache 'workstreams/active/landing-polish.json'
+        $ledgerPath = Join-Path $env.Cache 'validation/repositories/test-member.json'
+        $unrelatedPath = Join-Path $env.Cache 'unrelated.json'
+        Copy-Item -LiteralPath $activePath -Destination $unrelatedPath
+        $beforeActive = (Get-FileHash -LiteralPath $activePath -Algorithm SHA256).Hash
+        $beforeLedger = (Get-FileHash -LiteralPath $ledgerPath -Algorithm SHA256).Hash
+        $beforeUnrelated = (Get-FileHash -LiteralPath $unrelatedPath -Algorithm SHA256).Hash
+        Write-TrackedCheckpoint -Env $env -ValidationId 'VAL-2'
+        $checkpoint = Get-Content -LiteralPath $env.Checkpoint -Raw | ConvertFrom-Json
+        foreach ($invalid in @('unrelated.json', 'workstreams/active/wrong-id.json', 'workstreams/active/../archive/landing-polish.json', $unrelatedPath)) {
+            $manifest.continuity.workstreamPath = $invalid
+            $manifest | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $manifestPath -Encoding UTF8
+            $beforeStatus = Invoke-Git -Root $env.Cache -Arguments @('status', '--porcelain', '--untracked-files=all')
+            Assert-Fails -Script {
+                Write-ContinuityState -ContextRoot $env.Cache -Checkpoint $checkpoint -MemberState ([pscustomobject]@{head='fixture';branch='main';dirty=$false;fingerprint='fixture'}) -GeneratedAt '2026-10-26T00:00:00Z' -SessionRelative 'sessions/2026/10/rejected.md'
+            } -Contains 'canonical bucket and id' | Out-Null
+            Assert-True -Condition ((Invoke-Git -Root $env.Cache -Arguments @('status', '--porcelain', '--untracked-files=all')) -eq $beforeStatus) -Message 'Invalid prior path must not mutate any Context files.'
+            Assert-True -Condition ((Get-FileHash -LiteralPath $activePath -Algorithm SHA256).Hash -eq $beforeActive -and
+                (Get-FileHash -LiteralPath $ledgerPath -Algorithm SHA256).Hash -eq $beforeLedger -and
+                (Get-FileHash -LiteralPath $unrelatedPath -Algorithm SHA256).Hash -eq $beforeUnrelated) -Message 'Invalid prior path must preserve Workstream, ledger and unrelated bytes.'
+        }
     } finally { Remove-Item -LiteralPath $env.Base -Recurse -Force -ErrorAction SilentlyContinue }
 } }
 
@@ -652,7 +713,7 @@ $tests += @{ Name = 'offline export import resumes exact workstream without remo
         Assert-True -Condition (Test-Path -LiteralPath (Join-Path $transfer 'context.bundle')) -Message 'Offline export must create a Git bundle.'
 
         $consumerRoot = Join-Path $env.Base 'member-offline'
-        & git clone $env.MemberBare $consumerRoot | Out-Null
+        & git -c core.longpaths=true clone $env.MemberBare $consumerRoot | Out-Null
         if ($LASTEXITCODE -ne 0) { throw 'Unable to clone offline consumer member repository.' }
         Initialize-GitIdentity -Root $consumerRoot
         $consumerTransfer = Join-Path $consumerRoot '.ai-bridge/context-transfer'
@@ -700,7 +761,7 @@ $tests += @{ Name = 'offline export import resumes exact workstream without remo
         Move-Item -LiteralPath $offlineRemote -Destination $env.ContextBare
         Invoke-Launcher -Env $consumer -Action 'reconnect'
         Assert-True -Condition (-not (Test-Path -LiteralPath (Join-Path $consumerRoot '.ai-bridge/context-offline.json'))) -Message 'Successful reconnect must clear the offline marker.'
-        $remoteHead = (& git --git-dir $env.ContextBare rev-parse refs/heads/main).Trim()
+        $remoteHead = (& git -c core.longpaths=true --git-dir $env.ContextBare rev-parse refs/heads/main).Trim()
         Assert-True -Condition ($remoteHead -eq $afterOfflineCheckpoint) -Message 'Reconnect must publish offline context commits with a normal push.'
         Invoke-Launcher -Env $consumer -Action 'start'
         $runtime3 = Get-Content -LiteralPath (Join-Path $consumerRoot '.ai-bridge/context-runtime.json') -Raw | ConvertFrom-Json
@@ -772,7 +833,7 @@ $tests += @{ Name = 'offline reconnect rejects divergent local and remote writer
         Move-Item -LiteralPath $env.ContextBare -Destination $remoteDisabled
 
         $consumerRoot = Join-Path $env.Base 'member-offline-diverged'
-        & git clone $env.MemberBare $consumerRoot | Out-Null
+        & git -c core.longpaths=true clone $env.MemberBare $consumerRoot | Out-Null
         if ($LASTEXITCODE -ne 0) { throw 'Unable to clone divergent offline consumer.' }
         Initialize-GitIdentity -Root $consumerRoot
         Copy-Item -LiteralPath (Join-Path $env.MemberClone '.ai-bridge/context-transfer') -Destination (Join-Path $consumerRoot '.ai-bridge/context-transfer') -Recurse
@@ -800,20 +861,20 @@ $tests += @{ Name = 'offline reconnect rejects divergent local and remote writer
 
         Move-Item -LiteralPath $remoteDisabled -Destination $env.ContextBare
         $remoteWriter = Join-Path $env.Base 'remote-writer'
-        & git clone --branch main --single-branch $env.ContextBare $remoteWriter | Out-Null
+        & git -c core.longpaths=true clone --branch main --single-branch $env.ContextBare $remoteWriter | Out-Null
         if ($LASTEXITCODE -ne 0) { throw 'Unable to clone remote writer.' }
         Initialize-GitIdentity -Root $remoteWriter
         Set-Content -LiteralPath (Join-Path $remoteWriter 'remote-independent.md') -Value 'remote writer' -Encoding UTF8
         Invoke-Git -Root $remoteWriter -Arguments @('add', 'remote-independent.md') | Out-Null
         Invoke-Git -Root $remoteWriter -Arguments @('commit', '-m', 'remote independent context') | Out-Null
         Invoke-Git -Root $remoteWriter -Arguments @('push', 'origin', 'main') | Out-Null
-        $remoteHead = (& git --git-dir $env.ContextBare rev-parse refs/heads/main).Trim()
+        $remoteHead = (& git -c core.longpaths=true --git-dir $env.ContextBare rev-parse refs/heads/main).Trim()
 
         $result = Invoke-LauncherAllowFailure -Env $consumer -Action 'reconnect'
         Assert-True -Condition ($result.ExitCode -ne 0) -Message 'Divergent offline/remote context must fail reconnect.'
         Assert-True -Condition ($result.Output -like '*offline reconciliation conflict*') -Message 'Divergence rejection must be explicit.'
         Assert-True -Condition ((Invoke-Git -Root $consumer.Cache -Arguments @('rev-parse','HEAD')) -eq $localHead) -Message 'Reconnect conflict must preserve local context HEAD.'
-        Assert-True -Condition ((& git --git-dir $env.ContextBare rev-parse refs/heads/main).Trim() -eq $remoteHead) -Message 'Reconnect conflict must preserve remote context HEAD.'
+        Assert-True -Condition ((& git -c core.longpaths=true --git-dir $env.ContextBare rev-parse refs/heads/main).Trim() -eq $remoteHead) -Message 'Reconnect conflict must preserve remote context HEAD.'
         Assert-True -Condition (Test-Path -LiteralPath (Join-Path $consumerRoot '.ai-bridge/context-offline.json')) -Message 'Reconnect conflict must preserve offline marker for explicit reconciliation.'
     } finally { Remove-Item -LiteralPath $env.Base -Recurse -Force -ErrorAction SilentlyContinue }
 } }
@@ -847,18 +908,18 @@ $tests += @{ Name = 'membership audit reports candidates without mutation'; Run 
     $env = New-TestEnvironment -Name 'membership-audit'
     try {
         $candidate = Join-Path $env.Base 'test-project-docs'
-        & git init --initial-branch=main $candidate | Out-Null
+        & git -c core.longpaths=true init --initial-branch=main $candidate | Out-Null
         if ($LASTEXITCODE -ne 0) { throw 'Unable to initialize audit candidate.' }
         Initialize-GitIdentity -Root $candidate
         Set-Content -LiteralPath (Join-Path $candidate 'AI_CONTEXT.md') -Value '# Candidate' -Encoding UTF8
         Invoke-Git -Root $candidate -Arguments @('add', 'AI_CONTEXT.md') | Out-Null
         Invoke-Git -Root $candidate -Arguments @('commit', '-m', 'candidate') | Out-Null
         $contextAlias = Join-Path $env.Base 'local-context-alias'
-        & git clone --branch main --single-branch $env.ContextBare $contextAlias | Out-Null
+        & git -c core.longpaths=true clone --branch main --single-branch $env.ContextBare $contextAlias | Out-Null
         if ($LASTEXITCODE -ne 0) { throw 'Unable to clone context alias.' }
-        $before = (& git --git-dir $env.ContextBare rev-parse refs/heads/main).Trim()
+        $before = (& git -c core.longpaths=true --git-dir $env.ContextBare rev-parse refs/heads/main).Trim()
         $audit = Invoke-LauncherAllowFailure -Env $env -Action 'audit'
-        $after = (& git --git-dir $env.ContextBare rev-parse refs/heads/main).Trim()
+        $after = (& git -c core.longpaths=true --git-dir $env.ContextBare rev-parse refs/heads/main).Trim()
         Assert-True -Condition ($audit.ExitCode -eq 0) -Message ("Membership audit must succeed read-only. Output: " + $audit.Output)
         Assert-True -Condition ($audit.Output -like '*test-project-docs*') -Message 'Audit must report unregistered candidate.'
         Assert-True -Condition ($audit.Output -notlike '*local-context-alias*') -Message 'Audit must exclude a sibling clone of the central context remote even when its folder name differs.'
@@ -872,7 +933,7 @@ $tests += @{ Name = 'online checkpoint divergence rejects without rebase'; Run =
         Invoke-Launcher -Env $env -Action 'start'
         Initialize-GitIdentity -Root $env.Cache
         $remoteWriter = Join-Path $env.Base 'remote-writer-online'
-        & git clone --branch main --single-branch $env.ContextBare $remoteWriter | Out-Null
+        & git -c core.longpaths=true clone --branch main --single-branch $env.ContextBare $remoteWriter | Out-Null
         if ($LASTEXITCODE -ne 0) { throw 'Unable to clone online remote writer.' }
         Initialize-GitIdentity -Root $remoteWriter
         $writerPath = $remoteWriter.Replace([char]92, [char]47)
@@ -886,7 +947,7 @@ git -C '$writerPath' commit -m 'remote online race' >/dev/null
 git -C '$writerPath' push origin main >/dev/null
 "@
         [System.IO.File]::WriteAllText($hook, $hookText, [System.Text.UTF8Encoding]::new($false))
-        & git -C $env.Cache update-index --refresh | Out-Null
+        & git -c core.longpaths=true -C $env.Cache update-index --refresh | Out-Null
         if (Get-Command bash -ErrorAction SilentlyContinue) { & bash -lc "chmod +x '$($hook.Replace([char]92,[char]47))'" | Out-Null }
         Write-ValidCheckpoint -Env $env
         $result = Invoke-LauncherAllowFailure -Env $env -Action 'checkpoint'
@@ -894,10 +955,10 @@ git -C '$writerPath' push origin main >/dev/null
         Assert-True -Condition ($result.Output -like '*histories diverged*') -Message 'Divergence failure must be explicit.'
         Assert-True -Condition (Test-Path -LiteralPath $env.Checkpoint) -Message 'Rejected checkpoint artifact must remain.'
         $localHead = Invoke-Git -Root $env.Cache -Arguments @('rev-parse', 'HEAD')
-        $remoteHead = (& git --git-dir $env.ContextBare rev-parse refs/heads/main).Trim()
+        $remoteHead = (& git -c core.longpaths=true --git-dir $env.ContextBare rev-parse refs/heads/main).Trim()
         Assert-True -Condition ($localHead -ne $remoteHead) -Message 'Divergent histories must remain distinct.'
-        & git -C $env.Cache merge-base --is-ancestor $localHead $remoteHead 2>$null; $localAncestor = $LASTEXITCODE -eq 0
-        & git -C $env.Cache merge-base --is-ancestor $remoteHead $localHead 2>$null; $remoteAncestor = $LASTEXITCODE -eq 0
+        & git -c core.longpaths=true -C $env.Cache merge-base --is-ancestor $localHead $remoteHead 2>$null; $localAncestor = $LASTEXITCODE -eq 0
+        & git -c core.longpaths=true -C $env.Cache merge-base --is-ancestor $remoteHead $localHead 2>$null; $remoteAncestor = $LASTEXITCODE -eq 0
         Assert-True -Condition (-not $localAncestor -and -not $remoteAncestor) -Message 'Both divergent histories must be preserved.'
         Assert-True -Condition (-not (Test-Path -LiteralPath (Join-Path $env.Cache '.git/rebase-merge')) -and -not (Test-Path -LiteralPath (Join-Path $env.Cache '.git/rebase-apply'))) -Message 'No rebase state may be created.'
     } finally { Remove-Item -LiteralPath $env.Base -Recurse -Force -ErrorAction SilentlyContinue }

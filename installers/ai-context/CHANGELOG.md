@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.2.9 (prepared, not published)
+
+- Install the strict Windows Start/Checkpoint/Verify gate; distinguish health-only Status from current-source milestone acceptance. Verify exact Manifest/state/new Session commit proof, payload SHA256, operation/Worktree identity, Tracked cursor and live canonical remote; bound child processes and redact invalid-evidence errors.
+- Add atomic ignored recovery journals, exclusive cache locks and GUID Session names. Replay rejected pushes, failed commits and publication-success/runtime failures without duplicate checkpoints. Preserve changed pending source/payload and reject forged journal scope, superseded receipts or divergent writers.
+- Introduce fingerprint-v2: raw UTF-8/NUL discovery, complete index identity, BOM-free Unicode batch hashing, fail-closed hashing and deep Windows paths without changing user configuration. Old fingerprints remain historical and require a fresh checkpoint.
+- Preserve archived Workstreams after later snapshots/new Workstreams; validate prior canonical paths before writes. Keep unresolved items and immutable validation IDs, with exact checkpoint retries idempotent.
+- Validate release manifest/VERSION consistency; test upgrades, repeated verification, installed bytes, relocated dirty Worktrees, missing dependencies and unmanaged-content preservation.
+- Extend actual installed real-Git E2E with independent recovery, source-drift rejection, repaired publication and direct project-hook invocation. Native Linux/macOS strict parity, actual Codex Trust, canonical release and fleet rollout remain explicit separate boundaries.
+- See docs/continuity-guarantee.md for tested operation/recovery commands and enforcement limits. This is a local candidate; canonical Git operations require owner authorization.
 ## 1.2.8
 
 - Make PowerShell checkpoint session directory and filename timestamps explicitly Gregorian and culture-invariant so non-Gregorian host cultures do not create paths such as `sessions/1405/...`.
