@@ -1,4 +1,4 @@
-param([string]$FixtureRoot='D:\Projects\Qbit\Qbit-worktrees\context-continuity-validation-20261026\shared-workstream')
+param([string]$FixtureRoot=(Join-Path ([IO.Path]::GetTempPath()) 'qbit-context-shared-workstream'))
 Set-StrictMode -Version Latest
 $ErrorActionPreference='Stop'
 $run=Join-Path $FixtureRoot ([guid]::NewGuid().ToString('N'));New-Item -ItemType Directory -Force $run|Out-Null

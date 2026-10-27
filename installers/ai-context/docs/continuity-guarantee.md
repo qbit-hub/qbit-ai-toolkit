@@ -4,11 +4,12 @@ This is a fail-closed milestone contract, not a promise of uninterrupted network
 
 ## Commands
 
-From `D:\Projects\Qbit\qbit-ai-toolkit`, first plan the **explicitly authorized** target installation:
+From the checked-out Toolkit repository root, first plan the **explicitly authorized** target installation. Supply the actual member Git worktree root, rather than relying on a hardcoded developer-machine path:
 
 ```powershell
-$member = 'D:\Projects\Qbit\<authorized-member-worktree>'
-$installer = 'D:\Projects\Qbit\qbit-ai-toolkit\installers\ai-context\install.ps1'
+$toolkit = (Get-Location).Path
+$member = Read-Host 'Absolute path of the authorized member Git worktree'
+$installer = Join-Path $toolkit 'installers/ai-context/install.ps1'
 & $installer -Operation plan -Mode member -Target $member -ProjectId qbit -RepositoryId '<registered-repository-id>' -ContextRemote 'https://github.com/qbit-hub/qbit-ai-context.git' -ContextBranch main
 & $installer -Operation install -Mode member -Target $member -ProjectId qbit -RepositoryId '<registered-repository-id>' -ContextRemote 'https://github.com/qbit-hub/qbit-ai-context.git' -ContextBranch main
 & $installer -Operation verify -Target $member
@@ -65,7 +66,7 @@ An incomplete preparation deliberately has no automatic destructive reconciliati
 Use a fresh, explicitly authorized registered member clone, install the accepted version there, and execute its Start gate. It retrieves central state without the original conversation or private journal. Read the **original owning repository's** records, rather than misattributing them to the reader:
 
 ```powershell
-$reader = 'D:\Projects\Qbit\<authorized-independent-reader>'
+$reader = Read-Host 'Absolute path of the authorized independent reader Git worktree'
 & (Join-Path $reader '.ai/context/context-sync-gate.ps1') -MemberPath $reader -Mode Start
 $cache = Join-Path $reader '.ai/context/cache/project-context'
 $owner = '<original-owning-repository-id>'

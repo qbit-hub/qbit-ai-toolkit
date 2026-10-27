@@ -1,4 +1,4 @@
-param([string]$FixtureRoot = 'D:\Projects\Qbit\Qbit-worktrees\context-continuity-validation-20261026\recovery-agent')
+param([string]$FixtureRoot = (Join-Path ([IO.Path]::GetTempPath()) 'qbit-context-recovery-agent'))
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $installer = Join-Path $PSScriptRoot '../../install.ps1'

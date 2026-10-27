@@ -18,7 +18,7 @@ function Invoke-Git {
     $previousErrorActionPreference = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     try {
-        $output = @(& git -C $WorkingDirectory @Arguments 2>&1)
+        $output = @(& git -c core.longpaths=true -C $WorkingDirectory @Arguments 2>&1)
         $code = $LASTEXITCODE
     } finally {
         $ErrorActionPreference = $previousErrorActionPreference
@@ -55,9 +55,9 @@ function Invoke-GitNetwork {
     $ErrorActionPreference = 'Continue'
     try {
         if ($NoWorkingDirectory) {
-            $output = @(& git @Arguments 2>&1)
+            $output = @(& git -c core.longpaths=true @Arguments 2>&1)
         } else {
-            $output = @(& git -C $WorkingDirectory @Arguments 2>&1)
+            $output = @(& git -c core.longpaths=true -C $WorkingDirectory @Arguments 2>&1)
         }
         $code = $LASTEXITCODE
     } finally {
@@ -71,9 +71,9 @@ function Invoke-GitNetwork {
             $ErrorActionPreference = 'Continue'
             try {
                 if ($NoWorkingDirectory) {
-                    $output = @(& git @credentialPrefix @Arguments 2>&1)
+                    $output = @(& git -c core.longpaths=true @credentialPrefix @Arguments 2>&1)
                 } else {
-                    $output = @(& git @credentialPrefix -C $WorkingDirectory @Arguments 2>&1)
+                    $output = @(& git -c core.longpaths=true @credentialPrefix -C $WorkingDirectory @Arguments 2>&1)
                 }
                 $code = $LASTEXITCODE
             } finally {
@@ -94,7 +94,7 @@ if (-not (Test-Path -LiteralPath $configPath -PathType Leaf)) {
     throw 'AI context config is missing.'
 }
 
-$config = Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json
+$config = Get-Content -Encoding UTF8 -LiteralPath $configPath -Raw | ConvertFrom-Json
 if ([int]$config.schemaVersion -ne 1) { throw 'Unsupported AI context config schemaVersion.' }
 
 $configuredRemote = [string]$config.context.remote
@@ -194,7 +194,7 @@ if ($null -eq $offlineMarker) {
         }
 
         if ($dirty) {
-            if ($Action -eq 'checkpoint') {
+            if ($Action -eq 'checkpoint' -and -not (Test-Path -LiteralPath (Join-Path $repoRoot '.ai-bridge/context-checkpoint-pending.json') -PathType Leaf)) {
                 throw 'Automated checkpoint refused because the AI context cache has pre-existing uncommitted changes.'
             }
             Write-Warning 'AI context cache is dirty; refresh skipped and local context will be loaded read-only.'
@@ -212,7 +212,7 @@ if ($null -eq $offlineMarker) {
     $actualBranch = (Invoke-Git -WorkingDirectory $cachePath -Arguments @('rev-parse', '--abbrev-ref', 'HEAD')).Output
     if ($actualBranch -ne $branch) { throw "AI context cache must remain on configured branch '$branch'." }
     $dirty = -not [string]::IsNullOrWhiteSpace((Invoke-Git -WorkingDirectory $cachePath -Arguments @('status', '--porcelain')).Output)
-    if ($dirty -and $Action -eq 'checkpoint') {
+    if ($dirty -and $Action -eq 'checkpoint' -and -not (Test-Path -LiteralPath (Join-Path $repoRoot '.ai-bridge/context-checkpoint-pending.json') -PathType Leaf)) {
         throw 'Automated checkpoint refused because the imported AI context cache has pre-existing uncommitted changes.'
     }
 }
