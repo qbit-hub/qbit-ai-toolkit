@@ -85,22 +85,6 @@ function Assert-ContextExportSafe {
     }
 }
 
-function Get-ContextContinuitySummary {
-    param([string]$CachePath, [string]$Repository)
-    $manifestPath = Join-Path $CachePath "manifests/repositories/$Repository.json"
-    if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) { return $null }
-    $manifest = Read-ContextJson -Path $manifestPath -Label 'Repository context manifest'
-    if (-not ($manifest.PSObject.Properties.Name -contains 'continuity') -or $null -eq $manifest.continuity) { return $null }
-    return [ordered]@{
-        mode = $manifest.continuity.mode
-        workstreamId = $manifest.continuity.workstreamId
-        workstreamStatus = $manifest.continuity.workstreamStatus
-        currentItemId = $manifest.continuity.currentItemId
-        workstreamPath = $manifest.continuity.workstreamPath
-        validationLedgerPath = $manifest.continuity.validationLedgerPath
-    }
-}
-
 function Export-ContextOfflineTransfer {
     param([string]$RepoRoot, [string]$CachePath, [object]$Config, [string]$Branch)
     if (-not (Test-Path -LiteralPath (Join-Path $CachePath '.git'))) { throw 'Central AI context cache must exist before offline export.' }
@@ -123,17 +107,36 @@ function Export-ContextOfflineTransfer {
     $contextHead = (Invoke-Git -WorkingDirectory $CachePath -Arguments @('rev-parse','HEAD')).Output
     $memberHead = (Invoke-Git -WorkingDirectory $RepoRoot -Arguments @('rev-parse','HEAD')).Output
     $memberBranch = (Invoke-Git -WorkingDirectory $RepoRoot -Arguments @('rev-parse','--abbrev-ref','HEAD')).Output
+    . (Join-Path $CachePath 'tooling/context-continuity.ps1')
+    $ownerPaths = Get-ContinuityRecordPaths -Repository ([string]$Config.repository) -MemberRoot $RepoRoot
+    $previous = Get-ContinuityPrevious -ContextRoot $CachePath -Repository ([string]$Config.repository) -MemberRoot $RepoRoot
+    $fingerprint = Get-ContinuityFingerprint -Root $RepoRoot
+    $receipt = $null; $continuity = $null
+    if ($null -ne $previous.Manifest) {
+        if ($previous.ReceiptSource -cne 'scoped') { throw 'Offline export requires a scoped owning checkpoint; checkpoint the reviewed owning Worktree before export.' }
+        if ([string]$previous.Manifest.commit -cne $memberHead -or [string]$previous.Manifest.branch -cne $memberBranch -or
+            [string]$previous.Manifest.worktreeFingerprint -cne $fingerprint) { throw 'Offline export source changed after its owning checkpoint; create a fresh checkpoint before export.' }
+        $session = [string]$previous.Manifest.session
+        if ($session -cnotmatch '^sessions/[0-9]{4}/[0-9]{2}/[A-Za-z0-9._-]+\.md$') { throw 'Offline export owning Session path is invalid.' }
+        $receipt = [ordered]@{manifest=$ownerPaths.Manifest;state=$ownerPaths.State;handoff=$ownerPaths.Handoff;session=$session;checkpointId=[string]$previous.Manifest.checkpointId;payloadSha256=[string]$previous.Manifest.checkpointPayloadSha256}
+        foreach ($pair in @(@($ownerPaths.Manifest,'manifestBlob'),@($ownerPaths.State,'stateBlob'),@($ownerPaths.Handoff,'handoffBlob'),@($session,'sessionBlob'))) {
+            $receipt[$pair[1]] = (Invoke-Git -WorkingDirectory $CachePath -Arguments @('rev-parse',($contextHead+':'+$pair[0]))).Output
+        }
+        if ($previous.Manifest.PSObject.Properties.Name -contains 'continuity') { $continuity = $previous.Manifest.continuity }
+    }
     $bundleHash = Get-ContextFileSha256 -Path $bundlePath
     $manifest = [ordered]@{
-        schemaVersion = 1
+        schemaVersion = 2
         kind = $script:ContextTransferKind
+        transferId = [guid]::NewGuid().ToString('N')
         createdAt = (Get-Date).ToString('o')
         project = [string]$Config.project
         repository = [string]$Config.repository
         contextBranch = $Branch
-        source = [ordered]@{ contextHead = $contextHead; memberHead = $memberHead; memberBranch = $memberBranch }
+        contextRemote = [string]$Config.context.remote
+        source = [ordered]@{ contextHead = $contextHead; memberHead = $memberHead; memberBranch = $memberBranch; memberWorktree=$RepoRoot; worktreeId=$ownerPaths.WorktreeId; worktreeFingerprint=$fingerprint; receipt=$receipt }
         bundle = [ordered]@{ file = 'context.bundle'; sha256 = $bundleHash; bytes = (Get-Item -LiteralPath $bundlePath).Length }
-        continuity = (Get-ContextContinuitySummary -CachePath $CachePath -Repository ([string]$Config.repository))
+        continuity = $continuity
     }
     Write-ContextJson -Path (Join-Path $temp 'manifest.json') -Value $manifest
 
@@ -152,9 +155,12 @@ function Export-ContextOfflineTransfer {
 function Assert-ContextTransferManifest {
     param([object]$Manifest, [object]$Config, [string]$Branch)
     $required = @('schemaVersion','kind','createdAt','project','repository','contextBranch','source','bundle','continuity')
+    if ([int]$Manifest.schemaVersion -eq 2) { $required += @('transferId','contextRemote') }
     $names = @($Manifest.PSObject.Properties.Name)
     if ($names.Count -ne $required.Count -or @($required | Where-Object { $names -notcontains $_ }).Count -gt 0) { throw 'AI context transfer manifest shape is invalid.' }
-    if ([int]$Manifest.schemaVersion -ne 1 -or [string]$Manifest.kind -ne $script:ContextTransferKind) { throw 'Unsupported AI context transfer manifest.' }
+    if ([int]$Manifest.schemaVersion -notin @(1,2) -or [string]$Manifest.kind -ne $script:ContextTransferKind) { throw 'Unsupported AI context transfer manifest.' }
+    if ([int]$Manifest.schemaVersion -eq 1 -and $null -ne $Manifest.continuity -and [string]$Manifest.continuity.mode -eq 'tracked') { throw 'Legacy tracked offline transfer lacks scoped ownership proof; re-export with transfer schemaVersion 2.' }
+    if ([int]$Manifest.schemaVersion -eq 2 -and ([string]$Manifest.transferId -cnotmatch '^[0-9a-f]{32}$' -or [string]$Manifest.contextRemote -cne [string]$Config.context.remote)) { throw 'AI context transfer identity/remote does not match this repository config.' }
     if ([string]$Manifest.project -ne [string]$Config.project) { throw 'AI context transfer project does not match this repository config.' }
     if ([string]$Manifest.repository -ne [string]$Config.repository) { throw 'AI context transfer repository does not match this repository config.' }
     if ([string]$Manifest.contextBranch -ne $Branch) { throw 'AI context transfer branch does not match this repository config.' }
@@ -165,9 +171,9 @@ function Assert-ContextTransferManifest {
 }
 
 function Write-ContextOfflineMarker {
-    param([string]$RepoRoot, [object]$Config, [string]$Branch, [string]$Remote, [string]$SourceHead, [string]$CurrentHead, [string]$BundleHash)
+    param([string]$RepoRoot, [object]$Config, [string]$Branch, [string]$Remote, [string]$SourceHead, [string]$CurrentHead, [string]$BundleHash, [object]$OwnershipTransfer = $null, [ValidateSet(1,2)][int]$SchemaVersion = 2)
     $marker = [ordered]@{
-        schemaVersion = 1
+        schemaVersion = $SchemaVersion
         kind = $script:ContextOfflineKind
         importedAt = (Get-Date).ToString('o')
         project = [string]$Config.project
@@ -178,6 +184,7 @@ function Write-ContextOfflineMarker {
         currentContextHead = $CurrentHead
         bundleSha256 = $BundleHash
     }
+    if ($SchemaVersion -eq 2) { $marker['ownershipTransfer'] = $OwnershipTransfer }
     Write-ContextJson -Path (Get-ContextOfflineMarkerPath -RepoRoot $RepoRoot) -Value $marker
 }
 
@@ -207,8 +214,6 @@ function Import-ContextOfflineTransfer {
         if ($actualBranch -ne $Branch) { throw "AI context cache must remain on configured branch '$Branch'." }
         $current = (Invoke-Git -WorkingDirectory $CachePath -Arguments @('rev-parse','HEAD')).Output
         if ($current.ToLowerInvariant() -ne $sourceHead.ToLowerInvariant()) { throw 'AI context offline import conflicts with the existing context cache HEAD; destructive reconciliation was refused.' }
-        $actualRemote = (Invoke-Git -WorkingDirectory $CachePath -Arguments @('remote','get-url','origin')).Output.TrimEnd([char[]]@('\','/'))
-        if ($actualRemote -ne $Remote) { Invoke-Git -WorkingDirectory $CachePath -Arguments @('remote','set-url','origin',$Remote) | Out-Null }
     } else {
         if (Test-Path -LiteralPath $CachePath) {
             $children = @(Get-ChildItem -LiteralPath $CachePath -Force -ErrorAction SilentlyContinue)
@@ -222,14 +227,21 @@ function Import-ContextOfflineTransfer {
             Remove-Item -LiteralPath $CachePath -Recurse -Force -ErrorAction SilentlyContinue
             throw 'Imported AI context HEAD does not match transfer provenance.'
         }
-        Invoke-Git -WorkingDirectory $CachePath -Arguments @('remote','set-url','origin',$Remote) | Out-Null
-        Invoke-Git -WorkingDirectory $CachePath -Arguments @('branch','--unset-upstream') -AllowFailure | Out-Null
     }
 
     if (-not (Test-Path -LiteralPath (Join-Path $CachePath 'tooling/context-lifecycle.ps1') -PathType Leaf)) { throw 'Imported AI context bundle is missing PowerShell lifecycle tooling.' }
-    Set-ImportedContextGitIdentity -RepoRoot $RepoRoot -CachePath $CachePath
     $currentHead = (Invoke-Git -WorkingDirectory $CachePath -Arguments @('rev-parse','HEAD')).Output
-    Write-ContextOfflineMarker -RepoRoot $RepoRoot -Config $Config -Branch $Branch -Remote $Remote -SourceHead $sourceHead -CurrentHead $currentHead -BundleHash $bundleHash
+    $ownershipTransfer = $null
+    if ([int]$manifest.schemaVersion -eq 2) {
+        . (Join-Path $CachePath 'tooling/context-continuity.ps1')
+        $ownershipTransfer = New-ContinuityOfflineOwnershipTransfer -ContextRoot $CachePath -Repository ([string]$Config.repository) -MemberRoot $RepoRoot -Transfer $manifest -ManifestPath $manifestPath -BundlePath $bundlePath -Importing
+    }
+    # Do not alter an existing cache's origin/identity until every provenance
+    # check passes. Rejected imports preserve the original Git configuration.
+    Invoke-Git -WorkingDirectory $CachePath -Arguments @('remote','set-url','origin',$Remote) | Out-Null
+    Invoke-Git -WorkingDirectory $CachePath -Arguments @('branch','--unset-upstream') -AllowFailure | Out-Null
+    Set-ImportedContextGitIdentity -RepoRoot $RepoRoot -CachePath $CachePath
+    Write-ContextOfflineMarker -RepoRoot $RepoRoot -Config $Config -Branch $Branch -Remote $Remote -SourceHead $sourceHead -CurrentHead $currentHead -BundleHash $bundleHash -OwnershipTransfer $ownershipTransfer -SchemaVersion ([int]$manifest.schemaVersion)
     Write-Output "AI context offline import ready: $currentHead"
 }
 
@@ -239,8 +251,9 @@ function Get-ContextOfflineMarker {
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return $null }
     $marker = Read-ContextJson -Path $path -Label 'AI context offline marker'
     $required = @('schemaVersion','kind','importedAt','project','repository','contextBranch','contextRemote','sourceContextHead','currentContextHead','bundleSha256')
+    if ([int]$marker.schemaVersion -eq 2) { $required += 'ownershipTransfer' }
     $names = @($marker.PSObject.Properties.Name)
-    if ($names.Count -ne $required.Count -or @($required | Where-Object { $names -notcontains $_ }).Count -gt 0 -or [int]$marker.schemaVersion -ne 1 -or [string]$marker.kind -ne $script:ContextOfflineKind) { throw 'AI context offline marker is invalid.' }
+    if ($names.Count -ne $required.Count -or @($required | Where-Object { $names -notcontains $_ }).Count -gt 0 -or [int]$marker.schemaVersion -notin @(1,2) -or [string]$marker.kind -ne $script:ContextOfflineKind) { throw 'AI context offline marker is invalid.' }
     if ([string]$marker.project -ne [string]$Config.project -or [string]$marker.repository -ne [string]$Config.repository) { throw 'AI context offline marker does not match this repository config.' }
     if ([string]$marker.contextBranch -ne $Branch -or [string]$marker.contextRemote -ne $Remote) { throw 'AI context offline marker remote/branch does not match this repository config.' }
     if (-not (Test-Path -LiteralPath (Join-Path $CachePath '.git'))) { throw 'AI context offline marker exists but the imported context cache is missing.' }
@@ -252,13 +265,18 @@ function Get-ContextOfflineMarker {
 function Update-ContextOfflineMarkerHead {
     param([string]$RepoRoot, [string]$CachePath, [object]$Config, [string]$Branch, [string]$Remote, [object]$Marker)
     $head = (Invoke-Git -WorkingDirectory $CachePath -Arguments @('rev-parse','HEAD')).Output
-    Write-ContextOfflineMarker -RepoRoot $RepoRoot -Config $Config -Branch $Branch -Remote $Remote -SourceHead ([string]$Marker.sourceContextHead) -CurrentHead $head -BundleHash ([string]$Marker.bundleSha256)
+    $ownershipTransfer = if ($Marker.PSObject.Properties.Name -contains 'ownershipTransfer') { $Marker.ownershipTransfer } else { $null }
+    Write-ContextOfflineMarker -RepoRoot $RepoRoot -Config $Config -Branch $Branch -Remote $Remote -SourceHead ([string]$Marker.sourceContextHead) -CurrentHead $head -BundleHash ([string]$Marker.bundleSha256) -OwnershipTransfer $ownershipTransfer -SchemaVersion ([int]$Marker.schemaVersion)
 }
 
 function Reconnect-ContextOffline {
     param([string]$RepoRoot, [string]$CachePath, [object]$Config, [string]$Branch, [string]$Remote)
     $marker = Get-ContextOfflineMarker -RepoRoot $RepoRoot -CachePath $CachePath -Config $Config -Branch $Branch -Remote $Remote
     if ($null -eq $marker) { throw 'AI context reconnect requires an imported offline context marker.' }
+    if ([int]$marker.schemaVersion -eq 2) {
+        . (Join-Path $CachePath 'tooling/context-continuity.ps1')
+        Get-ContinuityOfflineOwnershipTransfer -ContextRoot $CachePath -Repository ([string]$Config.repository) -MemberRoot $RepoRoot | Out-Null
+    }
     Assert-ContextCacheClean -CachePath $CachePath -Purpose 'reconnect'
     Invoke-Git -WorkingDirectory $CachePath -Arguments @('remote','set-url','origin',$Remote) | Out-Null
     $fetch = Invoke-GitNetwork -WorkingDirectory $CachePath -Arguments @('fetch','origin',$Branch) -Remote $Remote -AllowFailure

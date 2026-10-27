@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 INSTALLER_ID = "installer.ai-context"
-INSTALLER_VERSION = "1.2.8"
+INSTALLER_VERSION = "1.2.9"
 STATE_PATH = ".qbit/toolkit/installed/ai-context.json"
 BLOCK_BEGIN = "<!-- qbit-toolkit:ai-context:start -->"
 BLOCK_END = "<!-- qbit-toolkit:ai-context:end -->"
@@ -194,7 +194,7 @@ def new_spec(mode: str, v: dict[str, str]) -> Spec:
     seeds: dict[str, str] = {}
     legacy_blocks: dict[str, str] = {}
     if mode == "member":
-        for rel in ("context.ps1", "context.sh", "context.py", "context-transfer.ps1"):
+        for rel in ("context.ps1", "context.sh", "context.py", "context-transfer.ps1", "context-sync-gate.ps1"):
             files[f".ai/context/{rel}"] = read_template(f"templates/common/member/{rel}")
         files[".ai/context/config.json"] = render("templates/common/member/config.json.tpl", v)
         files[".ai/context/.gitignore"] = read_template("templates/common/member/context.gitignore")
@@ -210,7 +210,7 @@ def new_spec(mode: str, v: dict[str, str]) -> Spec:
         files["tooling/context-lifecycle.ps1"] = read_template("templates/common/central/tooling/context-lifecycle.ps1")
         files["tooling/context-continuity.ps1"] = read_template("templates/common/central/tooling/context-continuity.ps1")
         files["tooling/context-lifecycle.py"] = read_template("templates/common/central/tooling/context-lifecycle.py")
-        for rel in ("context.ps1", "context.sh", "context.py", "context-transfer.ps1"):
+        for rel in ("context.ps1", "context.sh", "context.py", "context-transfer.ps1", "context-sync-gate.ps1"):
             files[f"templates/member/{rel}"] = read_template(f"templates/common/member/{rel}")
         files["tests/context-lifecycle.tests.ps1"] = read_template("templates/common/central/tests/context-lifecycle.tests.ps1")
         files["tests/context-lifecycle.tests.sh"] = read_template("templates/common/central/tests/context-lifecycle.tests.sh")
@@ -649,6 +649,11 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     ns = build_parser().parse_args()
     try:
+        manifest = json.loads((ROOT / "manifest.json").read_text(encoding="utf-8-sig"))
+        version = (ROOT / "VERSION").read_text(encoding="utf-8-sig").strip()
+        if (manifest.get("id") != INSTALLER_ID or manifest.get("version") != INSTALLER_VERSION
+                or version != INSTALLER_VERSION or not re.fullmatch(r"\d+\.\d+\.\d+", version)):
+            raise InstallerError("Invalid installer manifest/VERSION identity or version mismatch.", 2)
         root = canonical_target(ns.target)
         state = read_state(root)
         if ns.operation == "verify":

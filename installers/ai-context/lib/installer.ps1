@@ -4,13 +4,22 @@ $ErrorActionPreference = 'Stop'
 $Script:InstallerRoot = ([System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))).TrimEnd('\','/')
 $Script:ToolkitRoot = ([System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..\..'))).TrimEnd('\','/')
 $Script:InstallerId = 'installer.ai-context'
-$Script:InstallerVersion = '1.2.8'
+$Script:InstallerVersion = '1.2.9'
 $Script:StatePath = '.qbit/toolkit/installed/ai-context.json'
 $Script:BlockBegin = '<!-- qbit-toolkit:ai-context:start -->'
 $Script:BlockEnd = '<!-- qbit-toolkit:ai-context:end -->'
 $Script:GitignoreBegin = '# qbit-toolkit:ai-context:start'
 $Script:GitignoreEnd = '# qbit-toolkit:ai-context:end'
 $Script:Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+
+function Assert-AiContextRelease {
+  $manifest=Get-Content -LiteralPath (Join-Path $Script:InstallerRoot 'manifest.json') -Raw | ConvertFrom-Json
+  $version=[IO.File]::ReadAllText((Join-Path $Script:InstallerRoot 'VERSION')).Trim()
+  if($manifest.id -cne $Script:InstallerId -or $manifest.version -cne $Script:InstallerVersion -or
+     $version -cne $Script:InstallerVersion -or $version -notmatch '^\d+\.\d+\.\d+$'){
+    throw 'Invalid installer manifest/VERSION identity or version mismatch.'
+  }
+}
 
 function ConvertTo-CanonicalPath([string]$Path) {
   return ([System.IO.Path]::GetFullPath($Path)).TrimEnd([System.IO.Path]::DirectorySeparatorChar,[System.IO.Path]::AltDirectorySeparatorChar)
@@ -258,6 +267,7 @@ function New-Spec([string]$Mode,[hashtable]$Variables) {
     $Files['.ai/context/context.sh'] = Read-Template 'templates/common/member/context.sh'
     $Files['.ai/context/context.py'] = Read-Template 'templates/common/member/context.py'
     $Files['.ai/context/context-transfer.ps1'] = Read-Template 'templates/common/member/context-transfer.ps1'
+    $Files['.ai/context/context-sync-gate.ps1'] = Read-Template 'templates/common/member/context-sync-gate.ps1'
     $Files['.ai/context/config.json'] = Render-Template 'templates/common/member/config.json.tpl' $Variables
     $Files['.ai/context/.gitignore'] = Read-Template 'templates/common/member/context.gitignore'
     $Blocks['AGENTS.md'] = [pscustomobject]@{ Begin=$Script:BlockBegin; End=$Script:BlockEnd; Content=(Render-Template 'templates/common/member/agents-block.md.tpl' $Variables) }
@@ -276,6 +286,7 @@ function New-Spec([string]$Mode,[hashtable]$Variables) {
     $Files['templates/member/context.sh'] = Read-Template 'templates/common/member/context.sh'
     $Files['templates/member/context.py'] = Read-Template 'templates/common/member/context.py'
     $Files['templates/member/context-transfer.ps1'] = Read-Template 'templates/common/member/context-transfer.ps1'
+    $Files['templates/member/context-sync-gate.ps1'] = Read-Template 'templates/common/member/context-sync-gate.ps1'
     $Files['tests/context-lifecycle.tests.ps1'] = Read-Template 'templates/common/central/tests/context-lifecycle.tests.ps1'
     $Files['tests/context-lifecycle.tests.sh'] = Read-Template 'templates/common/central/tests/context-lifecycle.tests.sh'
     $Files['schemas/checkpoint.schema.json'] = Read-Template 'templates/common/central/schemas/checkpoint.schema.json'

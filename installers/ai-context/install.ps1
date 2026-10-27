@@ -22,6 +22,7 @@ $ErrorActionPreference='Stop'
 $ExitCode=0
 $Result=$null
 try {
+  Assert-AiContextRelease
   $Root=Resolve-AiContextTarget $Target
   $State=Get-State $Root
 
