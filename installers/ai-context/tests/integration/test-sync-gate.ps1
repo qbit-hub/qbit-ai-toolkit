@@ -78,7 +78,11 @@ if($Action -eq 'checkpoint'){
     [IO.File]::WriteAllText($record,("Latest session: "+$session+"; Next: "+$cp.nextAction+"; nonce: "+[Guid]::NewGuid().ToString('N')))
     $head=(&git -C $root rev-parse HEAD).Trim()
     $capturedFingerprint=(SourceFingerprint)
-    $continuity=@{schemaVersion=2;mode=$cp.continuity.mode;workstreamId=$null;workstreamStatus=$null;currentItemId=$null;workstreamPath=$null}
+    $ledgerPath='validation/repositories/qbit-test-gate.json'
+    $ledgerFile=Join-Path $cache $ledgerPath
+    New-Item -ItemType Directory -Force (Split-Path $ledgerFile -Parent)|Out-Null
+    [IO.File]::WriteAllText($ledgerFile,(@{schemaVersion=2;repository='qbit-test-gate';entries=@()}|ConvertTo-Json -Depth 8))
+    $continuity=@{schemaVersion=2;mode=$cp.continuity.mode;workstreamId=$null;workstreamStatus=$null;currentItemId=$null;workstreamPath=$null;validationLedgerPath=$ledgerPath}
     if($cp.continuity.mode -eq 'tracked') {
       $ws=$cp.continuity.workstream
       $continuity.workstreamId=$ws.id
@@ -97,7 +101,7 @@ if($Action -eq 'checkpoint'){
     $manifest=@{schemaVersion=1;generatedAt=[DateTime]::UtcNow.ToString('o');project='qbit';repository='qbit-test-gate';branch='main';dirty=$false;memberWorktree=$root;checkpointId=[Guid]::NewGuid().ToString('N');checkpointPayloadSha256=(Get-FileHash -LiteralPath (Join-Path $root '.ai-bridge/context-checkpoint.json') -Algorithm SHA256).Hash;worktreeFingerprint=$capturedFingerprint;commit=$head;scope=$scope;status=$cp.status;session=$session;continuity=$continuity}
     [IO.File]::WriteAllText($manifestFile,($manifest|ConvertTo-Json -Depth 8))
     if(-not $reuse){[IO.File]::WriteAllText((Join-Path $cache $session),('Checkpoint ID: '+$manifest.checkpointId+"`nCheckpoint payload SHA256: "+$manifest.checkpointPayloadSha256))}
-    &git -C $cache add state/repositories/qbit-test-gate.md manifests/repositories/qbit-test-gate.json $session
+    &git -C $cache add state/repositories/qbit-test-gate.md manifests/repositories/qbit-test-gate.json $session $ledgerPath
     if($continuity.workstreamPath){&git -C $cache add $continuity.workstreamPath}
   }
   &git -C $cache commit -q -m fixture-checkpoint

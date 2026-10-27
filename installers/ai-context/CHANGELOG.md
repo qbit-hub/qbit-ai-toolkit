@@ -2,6 +2,11 @@
 
 ## 1.2.9 (prepared, not published)
 
+- Isolate Windows current receipts by repository and normalized Worktree root; retain repository summaries for compatibility, preserve sibling cursors and bind global Workstream ownership to the publishing Worktree. Refuse ambiguous legacy mapping, missing scoped receipts and unsafe sibling takeovers; preserve append-only validation and exact journal replay across sibling publications.
+- Add actual installed linked-Worktree isolation and published-provenance negative fixtures with byte-preservation checks; project hook and premerge consumers select independently derived scoped receipt paths. Native POSIX strict/isolation parity remains unverified.
+- Fail closed when an owning Manifest is missing but its state/handoff or active Workstream remains, and require the owning Workstream Session to match. Verify derives and checks the published immutable ledger prefix, rejecting removed, rewritten, truncated or duplicate-ID evidence while accepting legitimate sibling appends.
+- Preserve explicit Windows offline portability through verified transfer-manifest v2 ownership mapping, original scoped records and durable new-checkpoint transfer provenance. Ordinary sibling clones cannot acquire that ownership.
+
 - Install the strict Windows Start/Checkpoint/Verify gate; distinguish health-only Status from current-source milestone acceptance. Verify exact Manifest/state/new Session commit proof, payload SHA256, operation/Worktree identity, Tracked cursor and live canonical remote; bound child processes and redact invalid-evidence errors.
 - Add atomic ignored recovery journals, exclusive cache locks and GUID Session names. Replay rejected pushes, failed commits and publication-success/runtime failures without duplicate checkpoints. Preserve changed pending source/payload and reject forged journal scope, superseded receipts or divergent writers.
 - Introduce fingerprint-v2: raw UTF-8/NUL discovery, complete index identity, BOM-free Unicode batch hashing, fail-closed hashing and deep Windows paths without changing user configuration. Old fingerprints remain historical and require a fresh checkpoint.

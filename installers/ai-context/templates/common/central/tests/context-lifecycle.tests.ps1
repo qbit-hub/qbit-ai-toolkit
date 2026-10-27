@@ -673,7 +673,7 @@ $tests += @{ Name = 'v2 malformed previous Workstream paths reject without mutat
         Write-TrackedCheckpoint -Env $env
         Invoke-Launcher -Env $env -Action 'checkpoint'
         . $centralContinuityTool
-        $manifestPath = Join-Path $env.Cache 'manifests/repositories/test-member.json'
+        $manifestPath = Join-Path $env.Cache (Get-ContinuityRecordPaths -Repository 'test-member' -MemberRoot $env.MemberClone).Manifest
         $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
         $activePath = Join-Path $env.Cache 'workstreams/active/landing-polish.json'
         $ledgerPath = Join-Path $env.Cache 'validation/repositories/test-member.json'
@@ -689,7 +689,7 @@ $tests += @{ Name = 'v2 malformed previous Workstream paths reject without mutat
             $manifest | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $manifestPath -Encoding UTF8
             $beforeStatus = Invoke-Git -Root $env.Cache -Arguments @('status', '--porcelain', '--untracked-files=all')
             Assert-Fails -Script {
-                Write-ContinuityState -ContextRoot $env.Cache -Checkpoint $checkpoint -MemberState ([pscustomobject]@{head='fixture';branch='main';dirty=$false;fingerprint='fixture'}) -GeneratedAt '2026-10-26T00:00:00Z' -SessionRelative 'sessions/2026/10/rejected.md'
+                Write-ContinuityState -ContextRoot $env.Cache -Checkpoint $checkpoint -MemberState ([pscustomobject]@{head='fixture';branch='main';dirty=$false;fingerprint='fixture'}) -GeneratedAt '2026-10-26T00:00:00Z' -SessionRelative 'sessions/2026/10/rejected.md' -MemberRoot $env.MemberClone
             } -Contains 'canonical bucket and id' | Out-Null
             Assert-True -Condition ((Invoke-Git -Root $env.Cache -Arguments @('status', '--porcelain', '--untracked-files=all')) -eq $beforeStatus) -Message 'Invalid prior path must not mutate any Context files.'
             Assert-True -Condition ((Get-FileHash -LiteralPath $activePath -Algorithm SHA256).Hash -eq $beforeActive -and
@@ -732,11 +732,51 @@ $tests += @{ Name = 'offline export import resumes exact workstream without remo
         }
         Invoke-Launcher -Env $consumer -Action 'import'
         Initialize-GitIdentity -Root $consumer.Cache
+        $markerPath = Join-Path $consumerRoot '.ai-bridge/context-offline.json'
+        $markerBytes = [IO.File]::ReadAllBytes($markerPath)
+        $transferManifestPath = Join-Path $consumerTransfer 'manifest.json'
+        $transferBytes = [IO.File]::ReadAllBytes($transferManifestPath)
+        $importedManifest = Get-Content -LiteralPath $transferManifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        $ownerPaths = $importedManifest.source.receipt
+        $ownerHashes = @{}
+        foreach ($relative in @($ownerPaths.manifest,$ownerPaths.state,$ownerPaths.handoff)) { $ownerHashes[$relative] = (Get-FileHash -LiteralPath (Join-Path $consumer.Cache $relative)).Hash }
+        foreach ($field in @('targetWorktreeId','sourceSession','sourceWorktreeId','transferManifestSha256')) {
+            $invalidMarker = Get-Content -LiteralPath $markerPath -Raw -Encoding UTF8 | ConvertFrom-Json
+            $invalidMarker.ownershipTransfer.$field = 'forged-value'
+            $invalidMarker | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $markerPath -Encoding UTF8
+            $beforeHead = Invoke-Git -Root $consumer.Cache -Arguments @('rev-parse','HEAD')
+            $rejected = Invoke-LauncherAllowFailure -Env $consumer -Action 'start'
+            Assert-True -Condition ($rejected.ExitCode -ne 0 -and $rejected.Output -like '*ownership mapping does not match*') -Message ('Modified offline mapping must fail closed: '+$field)
+            Assert-True -Condition ((Invoke-Git -Root $consumer.Cache -Arguments @('rev-parse','HEAD')) -eq $beforeHead) -Message 'Rejected offline mapping must preserve Context history.'
+            [IO.File]::WriteAllBytes($markerPath,$markerBytes)
+        }
+        $invalidMarker = Get-Content -LiteralPath $markerPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        $invalidMarker.ownershipTransfer = $null
+        $invalidMarker | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $markerPath -Encoding UTF8
+        $rejected = Invoke-LauncherAllowFailure -Env $consumer -Action 'start'
+        Assert-True -Condition ($rejected.ExitCode -ne 0 -and $rejected.Output -like '*ownership mapping is missing*') -Message 'Missing offline mapping must fail closed instead of dropping imported continuation.'
+        [IO.File]::WriteAllBytes($markerPath,$markerBytes)
+        $invalidTransfer = Get-Content -LiteralPath $transferManifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        $invalidTransfer.continuity.currentItemId = 'FORGED-CURSOR'
+        $invalidTransfer | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $transferManifestPath -Encoding UTF8
+        $rejected = Invoke-LauncherAllowFailure -Env $consumer -Action 'start'
+        Assert-True -Condition ($rejected.ExitCode -ne 0 -and $rejected.Output -like '*continuity does not match*') -Message 'Modified exported cursor must not replace anchored owning state.'
+        [IO.File]::WriteAllBytes($transferManifestPath,$transferBytes)
+        $invalidTransfer = Get-Content -LiteralPath $transferManifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        $invalidTransfer.source.receipt = $null
+        $invalidTransfer.continuity = $null
+        $invalidTransfer | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $transferManifestPath -Encoding UTF8
+        $rejected = Invoke-LauncherAllowFailure -Env $consumer -Action 'start'
+        Assert-True -Condition ($rejected.ExitCode -ne 0 -and $rejected.Output -like '*omitted an existing owning source receipt*') -Message 'Removing both transfer receipt and continuity must not erase imported unresolved work.'
+        [IO.File]::WriteAllBytes($transferManifestPath,$transferBytes)
         Invoke-Launcher -Env $consumer -Action 'start'
         $runtime = Get-Content -LiteralPath (Join-Path $consumerRoot '.ai-bridge/context-runtime.json') -Raw | ConvertFrom-Json
         Assert-True -Condition ($runtime.context.freshness -eq 'OFFLINE_IMPORTED_CONTEXT') -Message 'Offline start must explicitly report imported offline context.'
         Assert-True -Condition ($runtime.continuity.workstreamId -eq 'landing-polish') -Message 'Offline import must recover the active workstream.'
         Assert-True -Condition ($runtime.continuity.currentItemId -eq 'WS-1') -Message 'Offline import must recover the exact execution cursor.'
+        Assert-True -Condition ($runtime.continuity.receiptSource -eq 'offline-transfer') -Message 'Imported original-owner receipt must be distinguished from a target publication.'
+        $bundleText = [IO.File]::ReadAllText((Join-Path $consumerRoot '.ai-bridge/context-runtime.md'))
+        Assert-True -Condition ($bundleText.Contains('Imported Original Owner Provenance') -and $bundleText.Contains('Finish WS-1.')) -Message 'Offline Markdown bundle must preserve the imported handoff and cursor.'
 
         $beforeOfflineCheckpoint = Invoke-Git -Root $consumer.Cache -Arguments @('rev-parse', 'HEAD')
         Write-TrackedCheckpoint -Env $consumer -ValidationId 'VAL-OFFLINE-2'
@@ -750,6 +790,12 @@ $tests += @{ Name = 'offline export import resumes exact workstream without remo
         $checkpoint.continuity.workstream.items[1].status = 'IN_PROGRESS'
         $checkpoint | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $consumer.Checkpoint -Encoding UTF8
         Invoke-Launcher -Env $consumer -Action 'checkpoint'
+        $newRuntime = Get-Content -LiteralPath (Join-Path $consumerRoot '.ai-bridge/context-runtime.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+        $newManifest = Get-Content -LiteralPath (Join-Path $consumer.Cache $newRuntime.continuity.receiptPaths.manifest) -Raw -Encoding UTF8 | ConvertFrom-Json
+        Assert-True -Condition ($newManifest.memberWorktree -eq $consumerRoot -and $newManifest.ownershipTransfer.sourceSession -eq $ownerPaths.session -and $newManifest.ownershipTransfer.transferId -eq $importedManifest.transferId) -Message 'New offline checkpoint must persist exact original-owner transfer provenance.'
+        $newSession = [IO.File]::ReadAllText((Join-Path $consumer.Cache $newManifest.session))
+        Assert-True -Condition ($newSession.Contains($importedManifest.transferId) -and $newSession.Contains($ownerPaths.session)) -Message 'New Session must durably record original transfer identity.'
+        foreach ($relative in $ownerHashes.Keys) { Assert-True -Condition ((Get-FileHash -LiteralPath (Join-Path $consumer.Cache $relative)).Hash -eq $ownerHashes[$relative]) -Message 'Offline migration must preserve original scoped receipt bytes.' }
         $afterOfflineCheckpoint = Invoke-Git -Root $consumer.Cache -Arguments @('rev-parse', 'HEAD')
         Assert-True -Condition ($afterOfflineCheckpoint -ne $beforeOfflineCheckpoint) -Message 'Offline checkpoint must commit continuity locally.'
         $marker = Get-Content -LiteralPath (Join-Path $consumerRoot '.ai-bridge/context-offline.json') -Raw | ConvertFrom-Json
@@ -767,6 +813,62 @@ $tests += @{ Name = 'offline export import resumes exact workstream without remo
         $runtime3 = Get-Content -LiteralPath (Join-Path $consumerRoot '.ai-bridge/context-runtime.json') -Raw | ConvertFrom-Json
         Assert-True -Condition ($runtime3.context.freshness -eq 'CURRENT_OR_FETCHED') -Message 'After reconnect, lifecycle must return to ordinary online freshness.'
         Assert-True -Condition ($runtime3.continuity.currentItemId -eq 'WS-2') -Message 'Reconnect must preserve the exact workstream cursor.'
+    } finally { Remove-Item -LiteralPath $env.Base -Recurse -Force -ErrorAction SilentlyContinue }
+} }
+
+$tests += @{ Name = 'legacy snapshot transfer remains readable without granting Workstream ownership'; Run = {
+    $env = New-TestEnvironment -Name 'offline-legacy-snapshot'
+    try {
+        Invoke-Launcher -Env $env -Action 'start'
+        Initialize-GitIdentity -Root $env.Cache
+        Write-ValidCheckpoint -Env $env
+        Invoke-Launcher -Env $env -Action 'checkpoint'
+        Invoke-Launcher -Env $env -Action 'export'
+        $transfer = Join-Path $env.MemberClone '.ai-bridge/context-transfer'
+        $exported = Get-Content -LiteralPath (Join-Path $transfer 'manifest.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+        $legacy = [ordered]@{schemaVersion=1;kind=$exported.kind;createdAt=$exported.createdAt;project=$exported.project;repository=$exported.repository;contextBranch=$exported.contextBranch;source=[ordered]@{contextHead=$exported.source.contextHead;memberHead=$exported.source.memberHead;memberBranch=$exported.source.memberBranch};bundle=$exported.bundle;continuity=$null}
+        $legacy | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath (Join-Path $transfer 'manifest.json') -Encoding UTF8
+        $consumerRoot = Join-Path $env.Base 'legacy-reader'
+        & git -c core.longpaths=true clone $env.MemberBare $consumerRoot | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw 'Unable to clone legacy snapshot reader.' }
+        Initialize-GitIdentity -Root $consumerRoot
+        New-Item -ItemType Directory -Path (Join-Path $consumerRoot '.ai-bridge') -Force | Out-Null
+        Copy-Item -LiteralPath $transfer -Destination (Join-Path $consumerRoot '.ai-bridge/context-transfer') -Recurse
+        $consumer = [pscustomobject]@{Base=$env.Base;MemberClone=$consumerRoot;Launcher=(Join-Path $consumerRoot '.ai/context/context.ps1');Cache=(Join-Path $consumerRoot '.ai/context/cache/project-context');Checkpoint=(Join-Path $consumerRoot '.ai-bridge/context-checkpoint.json')}
+        Invoke-Launcher -Env $consumer -Action 'import'
+        Invoke-Launcher -Env $consumer -Action 'start'
+        $runtime = Get-Content -LiteralPath (Join-Path $consumerRoot '.ai-bridge/context-runtime.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+        Assert-True -Condition ($runtime.context.freshness -eq 'OFFLINE_IMPORTED_CONTEXT' -and -not $runtime.continuity.workstreamId) -Message 'Legacy snapshot reader must remain explicitly offline without acquiring another Workstream.'
+        Write-ValidCheckpoint -Env $consumer
+        $checkpoint = Get-Content -LiteralPath $consumer.Checkpoint -Raw -Encoding UTF8 | ConvertFrom-Json
+        $checkpoint.schemaVersion=2
+        $checkpoint | Add-Member -NotePropertyName continuity -NotePropertyValue ([pscustomobject]@{mode='snapshot';workstream=$null;validationLedger=@()})
+        $checkpoint | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $consumer.Checkpoint -Encoding UTF8
+        Invoke-Launcher -Env $consumer -Action 'checkpoint'
+        Invoke-Launcher -Env $consumer -Action 'start'
+        $marker = Get-Content -LiteralPath (Join-Path $consumerRoot '.ai-bridge/context-offline.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+        Assert-True -Condition ($marker.schemaVersion -eq 1 -and $marker.currentContextHead -eq (Invoke-Git -Root $consumer.Cache -Arguments @('rev-parse','HEAD'))) -Message 'Legacy snapshot marker must remain compatible after a new local snapshot checkpoint.'
+    } finally { Remove-Item -LiteralPath $env.Base -Recurse -Force -ErrorAction SilentlyContinue }
+} }
+
+$tests += @{ Name = 'offline import rejects changed target source without changing existing cache configuration'; Run = {
+    $env = New-TestEnvironment -Name 'offline-source-preservation'
+    try {
+        Invoke-Launcher -Env $env -Action 'start'
+        Initialize-GitIdentity -Root $env.Cache
+        Write-TrackedCheckpoint -Env $env
+        Invoke-Launcher -Env $env -Action 'checkpoint'
+        Invoke-Launcher -Env $env -Action 'export'
+        Set-Content -LiteralPath (Join-Path $env.MemberClone 'new-local-source.txt') -Value 'preserve source drift' -Encoding UTF8
+        $retainedOrigin = Join-Path $env.Base 'retained-user-origin.git'
+        Invoke-Git -Root $env.Cache -Arguments @('remote','set-url','origin',$retainedOrigin) | Out-Null
+        $configPath = Join-Path $env.Cache '.git/config'
+        $beforeConfig = (Get-FileHash -LiteralPath $configPath).Hash
+        $beforeHead = Invoke-Git -Root $env.Cache -Arguments @('rev-parse','HEAD')
+        $beforeSource = (Get-FileHash -LiteralPath (Join-Path $env.MemberClone 'new-local-source.txt')).Hash
+        $result = Invoke-LauncherAllowFailure -Env $env -Action 'import'
+        Assert-True -Condition ($result.ExitCode -ne 0 -and $result.Output -like '*target source HEAD/branch/fingerprint does not match*') -Message 'Changed target source must reject the ownership import.'
+        Assert-True -Condition ((Get-FileHash -LiteralPath $configPath).Hash -eq $beforeConfig -and (Invoke-Git -Root $env.Cache -Arguments @('rev-parse','HEAD')) -eq $beforeHead -and (Get-FileHash -LiteralPath (Join-Path $env.MemberClone 'new-local-source.txt')).Hash -eq $beforeSource) -Message 'Rejected import must preserve existing cache configuration, history and local source bytes.'
     } finally { Remove-Item -LiteralPath $env.Base -Recurse -Force -ErrorAction SilentlyContinue }
 } }
 

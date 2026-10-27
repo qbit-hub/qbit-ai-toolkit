@@ -93,8 +93,60 @@ function Assert-Synced([string]$Root,$Config,[datetime]$NotBefore,[bool]$Fresh) 
   if($remoteHead -ne $head){Fail "central published head differs from local cache"}
   return [pscustomobject]@{Root=$Root;Member=$Config.repository;Head=$head;RootHead=$memberHead;RootFingerprint=[string]$rt.member.fingerprint;RootBranch=[string]$rt.member.branch;RootDirty=[string]$rt.member.dirty}
 }
+function Resolve-ReceiptPaths([string]$Cache,[string]$Root,[string]$Repository) {
+  $normalized=[IO.Path]::GetFullPath($Root).TrimEnd([char[]]@([char]92,[char]47)).Replace([char]92,[char]47).ToLowerInvariant()
+  $sha=[Security.Cryptography.SHA256]::Create()
+  try{$id='wt-'+(-join($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($normalized))|ForEach-Object{$_.ToString('x2')})).Substring(0,32)}finally{$sha.Dispose()}
+  $manifest='manifests/worktrees/'+$Repository+'/'+$id+'.json'
+  $state='state/worktrees/'+$Repository+'/'+$id+'.md'
+  $handoff='handoffs/worktrees/'+$Repository+'/'+$id+'.md'
+  if(Test-Path -LiteralPath (Join-Path $Cache $manifest) -PathType Leaf){
+    return [pscustomobject]@{Manifest=$manifest;State=$state;Handoff=$handoff;WorktreeId=$id;Scoped=$true}
+  }
+  $legacy='manifests/repositories/'+$Repository+'.json'
+  if(-not(Test-Path -LiteralPath (Join-Path $Cache $legacy) -PathType Leaf)){Fail 'published member manifest absent'}
+  $record=Get-Content -Encoding UTF8 -LiteralPath (Join-Path $Cache $legacy) -Raw|ConvertFrom-Json
+  if(($record.PSObject.Properties.Name -contains 'worktreeId') -or ($record.PSObject.Properties.Name -contains 'receiptPaths')){Fail 'published Worktree receipt absent; repository summary is not current Worktree authority'}
+  if([IO.Path]::GetFullPath([string]$record.memberWorktree).TrimEnd('\') -ine $Root.TrimEnd('\')){Fail 'published Manifest does not represent the current owning source state'}
+  return [pscustomobject]@{Manifest=$legacy;State=('state/repositories/'+$Repository+'.md');Handoff=('handoffs/repositories/'+$Repository+'.md');WorktreeId=$id;Scoped=$false}
+}
+function Assert-PublishedValidationLedger([string]$Cache,[string]$Publication,[string]$CurrentHead,[string]$Repository,$Continuity) {
+  # Derive this path independently: a Manifest cannot redirect validation proof
+  # to an unrelated repository or replace append-only history with a new file.
+  $relative='validation/repositories/'+$Repository+'.json'
+  if($Continuity.PSObject.Properties.Name -notcontains 'validationLedgerPath' -or
+     [string]$Continuity.validationLedgerPath -cne $relative){Fail 'published validation ledger path mismatch'}
+  try {
+    $published=Invoke-GitChecked @('-C',$Cache,'show',($Publication+':'+$relative)) | ConvertFrom-Json
+    $current=Invoke-GitChecked @('-C',$Cache,'show',($CurrentHead+':'+$relative)) | ConvertFrom-Json
+  } catch {Fail 'published validation ledger absent or invalid'}
+  foreach($ledger in @($published,$current)){
+    if($null -eq $ledger -or $ledger.PSObject.Properties.Name -notcontains 'schemaVersion' -or
+       $ledger.PSObject.Properties.Name -notcontains 'repository' -or
+       $ledger.PSObject.Properties.Name -notcontains 'entries' -or
+       [int]$ledger.schemaVersion -ne 2 -or [string]$ledger.repository -cne $Repository -or
+       $ledger.entries -isnot [array]){Fail 'published validation ledger schema or repository mismatch'}
+  }
+  $oldEntries=@($published.entries);$newEntries=@($current.entries)
+  if($newEntries.Count -lt $oldEntries.Count){Fail 'validation ledger lost previously published entries'}
+  for($index=0;$index -lt $oldEntries.Count;$index++){
+    if(($oldEntries[$index]|ConvertTo-Json -Depth 30 -Compress) -cne
+       ($newEntries[$index]|ConvertTo-Json -Depth 30 -Compress)){Fail 'validation ledger entries changed after publication'}
+  }
+  $seen=@{}
+  foreach($entry in $newEntries){
+    if($null -eq $entry -or $entry.PSObject.Properties.Name -notcontains 'id' -or
+       [string]::IsNullOrWhiteSpace([string]$entry.id) -or $seen.ContainsKey([string]$entry.id)){
+      Fail 'validation ledger entry identities missing or duplicated'
+    }
+    $seen[[string]$entry.id]=$true
+  }
+  # A sibling Worktree may append its own valid evidence. Historical entries
+  # remain immutable; their validFor fingerprint is not this owner's source.
+}
 function Assert-PublishedCheckpoint([string]$Cache,$Current,$Config) {
-  $relative='manifests/repositories/'+[string]$Config.repository+'.json'
+  $receipt=Resolve-ReceiptPaths $Cache $Current.Root ([string]$Config.repository)
+  $relative=$receipt.Manifest
   $manifest=Invoke-GitChecked @('-C',$Cache,'show',($Current.Head+':'+$relative)) | ConvertFrom-Json
   if($manifest.schemaVersion -ne 1 -or $manifest.repository -ne $Config.repository -or
      $manifest.project -ne $Config.project -or $manifest.commit -ne $Current.RootHead -or
@@ -104,13 +156,18 @@ function Assert-PublishedCheckpoint([string]$Cache,$Current,$Config) {
     Fail 'published Manifest does not represent the current owning source state'
   }
   if([string]$manifest.checkpointPayloadSha256 -notmatch '^[a-fA-F0-9]{64}$' -or [string]$manifest.checkpointId -notmatch '^[a-fA-F0-9]{32}$'){Fail 'checkpoint identity or payload digest missing'}
+  if($receipt.Scoped -and ([string]$manifest.worktreeId -cne $receipt.WorktreeId -or
+     [string]$manifest.receiptPaths.manifest -cne $receipt.Manifest -or
+     [string]$manifest.receiptPaths.state -cne $receipt.State -or
+     [string]$manifest.receiptPaths.handoff -cne $receipt.Handoff)){Fail 'published Worktree receipt paths or identity mismatch'}
   if(-not $manifest.continuity -or $manifest.continuity.schemaVersion -ne 2 -or @('snapshot','tracked') -notcontains [string]$manifest.continuity.mode){Fail 'published checkpoint requires Continuity v2'}
   $generated=if($manifest.generatedAt -is [DateTime]){[DateTimeOffset]$manifest.generatedAt}else{[DateTimeOffset]::Parse([string]$manifest.generatedAt,[Globalization.CultureInfo]::InvariantCulture)}
   $age=([DateTimeOffset]::UtcNow-$generated).TotalMinutes
   if($age -lt -5 -or $age -gt $MaxAgeMinutes){Fail 'published checkpoint expired or future dated'}
   $publication=Invoke-GitChecked @('-C',$Cache,'log','-1','--format=%H',$Current.Head,'--',$relative)
   if(-not $publication){Fail 'Manifest publication commit absent'}
-  $record='state/repositories/'+[string]$Config.repository+'.md'
+  Assert-PublishedValidationLedger $Cache $publication $Current.Head ([string]$Config.repository) $manifest.continuity
+  $record=$receipt.State
   $session=[string]$manifest.session
   if($session -notmatch '^sessions/[0-9]{4}/[0-9]{2}/[a-zA-Z0-9._-]+\.md$'){Fail 'invalid published Session path'}
   $changed=Invoke-GitChecked @('-C',$Cache,'diff-tree','--root','--no-commit-id','--name-only','-r',$publication)
@@ -121,7 +178,14 @@ function Assert-PublishedCheckpoint([string]$Cache,$Current,$Config) {
   if($first -ne $publication){Fail 'reused historical Session'}
   $state=Invoke-GitChecked @('-C',$Cache,'show',($Current.Head+':'+$record))
   if(-not $state.Contains($session)){Fail 'owning state Session mismatch'}
-  foreach($boundPath in @($record,$session)){
+  $boundPaths=@($record,$session)
+  if($receipt.Scoped){
+    if(@($changed -split '[\r\n]+') -notcontains $receipt.Handoff){Fail 'Worktree handoff was not committed with Manifest'}
+    $handoffText=Invoke-GitChecked @('-C',$Cache,'show',($Current.Head+':'+$receipt.Handoff))
+    if(-not $handoffText.Contains($session)){Fail 'Worktree handoff Session mismatch'}
+    $boundPaths+=$receipt.Handoff
+  }
+  foreach($boundPath in $boundPaths){
     $publishedBlob=Invoke-GitChecked @('-C',$Cache,'rev-parse',($publication+':'+$boundPath))
     $currentBlob=Invoke-GitChecked @('-C',$Cache,'rev-parse',($Current.Head+':'+$boundPath))
     if($publishedBlob -ne $currentBlob){Fail 'checkpoint state or Session changed after the Manifest publication'}
@@ -142,6 +206,8 @@ function Assert-PublishedCheckpoint([string]$Cache,$Current,$Config) {
     if($ws.id -ne $manifest.continuity.workstreamId -or $ws.status -ne $manifest.continuity.workstreamStatus -or
        $ws.cursor.currentItemId -ne $manifest.continuity.currentItemId -or $ws.lastCheckpoint.session -ne $session -or
        [string]::IsNullOrWhiteSpace([string]$ws.cursor.nextAction) -or -not $state.Contains([string]$ws.cursor.nextAction)){Fail 'published Workstream cursor or Session mismatch'}
+    if($receipt.Scoped -and ([string]$ws.lastCheckpoint.worktreeId -cne $receipt.WorktreeId -or
+       [IO.Path]::GetFullPath([string]$ws.lastCheckpoint.memberWorktree).TrimEnd('\') -ine $Current.Root.TrimEnd('\'))){Fail 'published Workstream belongs to another Worktree owner'}
   } elseif($manifest.continuity.workstreamId){Fail 'Snapshot has an active Workstream'}
   return $manifest
 }
@@ -205,8 +271,9 @@ try {
   $after=Assert-Synced $root $cfg $started $false
   if($before.Head -eq $after.Head){Fail "checkpoint did not produce a new commit"}
   $cache=Join-Path $root $path
-  $memberRecord='state/repositories/'+[string]$cfg.repository+'.md'
-  $record=Join-Path $cache ('state\repositories\'+[string]$cfg.repository+'.md')
+  $receipt=Resolve-ReceiptPaths $cache $root ([string]$cfg.repository)
+  $memberRecord=$receipt.State
+  $record=Join-Path $cache $memberRecord
   if(-not (Test-Path -LiteralPath $record -PathType Leaf)){Fail "published member state missing"}
   # An unrelated Context writer can advance main while the member's state
   # record remains unchanged. New HEAD alone is never a checkpoint receipt.
@@ -218,10 +285,10 @@ try {
   # Bind the publication to the checkpoint payload, not just an incidental
   # change to the member's status file. The canonical engine writes a per-member
   # manifest and a freshly added session with the exact checkpoint metadata.
-  $manifestRelative='manifests/repositories/'+[string]$cfg.repository+'.json'
+  $manifestRelative=$receipt.Manifest
   $changedManifest=Invoke-GitChecked @('-C',$cache,'diff','--name-only',$before.Head,$after.Head,'--',$manifestRelative)
   if($changedManifest -ne $manifestRelative){Fail "member provenance manifest was not published"}
-  $manifestFile=Join-Path $cache ('manifests\repositories\'+[string]$cfg.repository+'.json')
+  $manifestFile=Join-Path $cache $manifestRelative
   if(-not(Test-Path -LiteralPath $manifestFile -PathType Leaf)){Fail "member provenance manifest absent"}
   try{$manifest=Get-Content -Encoding UTF8 -LiteralPath $manifestFile -Raw|ConvertFrom-Json}
   catch{Fail "member provenance manifest invalid JSON"}

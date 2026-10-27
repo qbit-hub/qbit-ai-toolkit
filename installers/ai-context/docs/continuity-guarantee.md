@@ -37,6 +37,8 @@ Start loads current context and checks membership, runtime, canonical origin and
 
 Verify returns exit 0 / `CONTEXT_SYNC_OK` only when the current member HEAD, branch, dirty flag, Worktree root and fingerprint match the canonical published Manifest; the Manifest, owning state and newly added Session belong to the same publication commit; the Session binds the operation ID and complete payload digest; and tracked workstream/cursor/session provenance agrees. Later state/Session/Workstream-only rewrites cannot reuse the old Manifest. Pending ignored payload edits also block. Manifest/runtime expiration defaults to 120 minutes; use the explicit bounded `-MaxAgeMinutes` policy when a workflow needs another interval.
 
+Verify independently derives `validation/repositories/<repository>.json` and reads its publication-time and current Git blobs. The schema/repository must match, every published entry remains unchanged in the same prefix position, and all current IDs are unique. Missing, rewritten or truncated evidence fails; legitimate sibling additions do not invalidate another Worktree's receipt. Historical entries retain their original `validFor` provenance rather than being relabeled as current.
+
 Failure is exit 3 / `CONTEXT_UNSYNCED`. A health pass, an unrelated remote advancement, or a touched receipt file is not a completed milestone.
 
 ## Fingerprints and historical evidence
@@ -70,9 +72,10 @@ $reader = Read-Host 'Absolute path of the authorized independent reader Git work
 & (Join-Path $reader '.ai/context/context-sync-gate.ps1') -MemberPath $reader -Mode Start
 $cache = Join-Path $reader '.ai/context/cache/project-context'
 $owner = '<original-owning-repository-id>'
-$manifest = Get-Content -Encoding UTF8 (Join-Path $cache "manifests/repositories/$owner.json") -Raw | ConvertFrom-Json
+$worktreeId = '<original-wt-32-hex-id-from-reviewed-source-evidence>'
+$manifest = Get-Content -Encoding UTF8 (Join-Path $cache "manifests/worktrees/$owner/$worktreeId.json") -Raw | ConvertFrom-Json
 $manifest | Select-Object repository,memberWorktree,commit,worktreeFingerprint,session,checkpointId
-Get-Content -Encoding UTF8 (Join-Path $cache "state/repositories/$owner.md") -Raw
+Get-Content -Encoding UTF8 (Join-Path $cache $manifest.receiptPaths.state) -Raw
 Get-Content -Encoding UTF8 (Join-Path $cache $manifest.session) -Raw
 if ($manifest.continuity.workstreamPath) { Get-Content -Encoding UTF8 (Join-Path $cache $manifest.continuity.workstreamPath) -Raw }
 Get-Content -Encoding UTF8 (Join-Path $cache 'state/pending-decisions.md') -Raw
@@ -80,7 +83,13 @@ Get-Content -Encoding UTF8 (Join-Path $cache 'state/pending-decisions.md') -Raw
 
 A new clone can recover coordination, not uncommitted product source. Worktree identity remains the original provenance until the new owner intentionally checkpoints its own source. Published sessions retain decisions/rejected approaches/questions and workstreams retain stable item/cursor IDs. Completed archives survive later snapshots and workstreams.
 
-Workstream IDs are global. Each has one publishing repository owner, recorded in `lastCheckpoint.repository`; repositories listed as collaborators do not gain implicit overwrite authority. A different member cannot replace that ID, even if it has no previous member Manifest. Ownership transfer requires an explicitly reviewed reconciliation; automatic checkpoints fail closed. The existing global terminal record remains transition authority after snapshots or newer cursors, so an old ID cannot be reused to reopen archived work.
+On Windows, current receipts are keyed by repository and Worktree identity. The identity is `wt-` followed by the first 32 hexadecimal SHA256 characters of the UTF-8 normalized absolute root (trim trailing separators, convert backslashes to slashes, lowercase invariant). It is independent of branch and does not silently follow a relocated directory. The Manifest, state and handoff live in `manifests/worktrees/<repository>/<id>.json`, `state/worktrees/<repository>/<id>.md` and `handoffs/worktrees/<repository>/<id>.md`. Manifest/runtime expose `worktreeId` and `receiptPaths`. Repository-level files remain latest-writer compatibility summaries; they cannot substitute for a missing scoped receipt. Start loads only the selected Worktree's records and cursor, including its Markdown bundle.
+
+A pre-isolation legacy receipt is usable only when its explicit `memberWorktree` matches the selected root. An unbound active legacy stream requires reviewed mapping. A relocated Worktree receives a different identity and must preserve/reconcile its original receipt and pending journal rather than claim ownership automatically. Old pending journals retain their original immutable file scope: a separately reviewed replay using the original accepted protocol can be required; no automatic journal rewriting or deletion is supported.
+
+The supported Windows `export` / explicit `import` / `reconnect` flow provides a verified relocation mapping. Transfer manifest schema `2` binds the original scoped Manifest/state/handoff/Session blobs to a Git-bundle anchor and exact source HEAD/branch/fingerprint. Import validates the target source and records its root identity. Each use rechecks the retained manifest, bundle and mapping; missing or altered source/target/cursor evidence blocks. The imported runtime explicitly labels the original owner's records as `offline-transfer`, not as a new published target receipt. A new offline checkpoint persists its own target records and transfer provenance in its Manifest, Session and Workstream, preserving the original scoped records. Reconnect still requires non-destructive ancestry. Neither an ordinary clone nor copying a runtime authorizes takeover. Transfer schema is independent of checkpoint/config schema; POSIX transfer remains schema `1`.
+
+Workstream IDs are global. Each has one publishing repository **and Worktree** owner, recorded in `lastCheckpoint.repository`, `memberWorktree` and `worktreeId`. Collaborators and sibling branches gain no implicit overwrite authority. Ownership transfer requires explicit reviewed reconciliation. A global terminal record remains transition authority after snapshots/newer cursors; an old ID cannot reopen archived work. Validation remains an append-only repository ledger with each entry bound to its originating Worktree; sibling appends do not invalidate a valid receipt or exact journal retry. Native POSIX receipt isolation is not certified by the Windows implementation.
 
 ## Enforcement boundary
 

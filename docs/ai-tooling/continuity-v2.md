@@ -9,6 +9,14 @@ Continuity v2 is the durable project-context model shipped by `installer.ai-cont
 
 ## Scope and authority
 
+### Windows Worktree receipt isolation
+
+The strict Windows workflow maintains a separate current Manifest, state and handoff per repository and normalized absolute Worktree root. `worktreeId` is `wt-` plus the first 32 lowercase SHA256 hexadecimal characters of the UTF-8 root after trailing-separator removal, forward-slash normalization and invariant lowercase. Current records are under `manifests/worktrees/<repository>/<worktreeId>.json`, `state/worktrees/<repository>/<worktreeId>.md` and `handoffs/worktrees/<repository>/<worktreeId>.md`; the Manifest/runtime declare independently verified `receiptPaths`.
+
+The older repository records remain latest-writer summaries for compatibility, not authoritative selectors for a sibling. Start selects the exact Worktree records and cursor; Checkpoint atomically publishes scoped and summary records; Verify binds the scoped records and new Session to their publication commit. Each global Workstream has one repository-and-Worktree publishing owner; a sibling must use its own distinct Workstream. Existing archives and per-Worktree receipts remain durable after other writers advance repository summaries or append validation entries.
+
+A legacy receipt is adopted only when it explicitly names the same owning root. Unbound active legacy records, old pending journals and relocation need reviewed migration; records are preserved and unsafe mapping fails closed. A new clone can read the original scoped receipt without importing a private cache/journal. Native POSIX adapter coverage does not certify this Windows isolation/strict-gate feature on Linux/macOS.
+
 AI Context stores coordination evidence: current workstream, work items, execution cursor, blockers, acceptance criteria, validation provenance, decisions, rejected approaches, and exact next action. It does not replace repository authority. Source, tests, schemas/migrations, contracts, ADRs, and other canonical owners remain authoritative for implementation claims.
 
 The core continuity rule is:

@@ -475,13 +475,17 @@ function Write-RuntimeBundle {
     }
 
     $repoId = [string]$Config.repository
-    $continuityRuntime = Get-ContinuityRuntime -ContextRoot $ContextRoot -Repository $repoId -MemberState $memberState
+    $continuityRuntime = Get-ContinuityRuntime -ContextRoot $ContextRoot -Repository $repoId -MemberState $memberState -MemberRoot $MemberRoot
     $runtime['continuity'] = [ordered]@{
         mode = $continuityRuntime.mode
         workstreamId = $continuityRuntime.workstreamId
         workstreamStatus = $continuityRuntime.workstreamStatus
         currentItemId = $continuityRuntime.currentItemId
         workstreamPath = $continuityRuntime.workstreamPath
+        worktreeId = $continuityRuntime.worktreeId
+        receiptPaths = $continuityRuntime.receiptPaths
+        receiptSource = $continuityRuntime.receiptSource
+        workstream = $continuityRuntime.workstream
         validation = $continuityRuntime.validation
     }
 
@@ -526,11 +530,27 @@ function Write-RuntimeBundle {
     }
 
     $repoId = [string]$Config.repository
-    $repoScoped = @(
-        @{ Title = 'Latest Repository State'; Path = "state/repositories/$repoId.md" },
-        @{ Title = 'Latest Repository Handoff'; Path = "handoffs/repositories/$repoId.md" },
-        @{ Title = 'Repository Provenance'; Path = "manifests/repositories/$repoId.json" }
-    )
+    $ownerRecords = Get-ContinuityRecordPaths -Repository $repoId -MemberRoot $MemberRoot
+    $repoScoped = @()
+    if ($continuityRuntime.receiptSource -eq 'scoped') {
+        $repoScoped = @(
+            @{ Title = 'Owning Worktree State'; Path = $ownerRecords.State },
+            @{ Title = 'Owning Worktree Handoff'; Path = $ownerRecords.Handoff },
+            @{ Title = 'Owning Worktree Provenance'; Path = $ownerRecords.Manifest }
+        )
+    } elseif ($continuityRuntime.receiptSource -eq 'bound-legacy') {
+        $repoScoped = @(
+            @{ Title = 'Bound Legacy Worktree State'; Path = $ownerRecords.LegacyState },
+            @{ Title = 'Bound Legacy Worktree Handoff'; Path = $ownerRecords.LegacyHandoff },
+            @{ Title = 'Bound Legacy Worktree Provenance'; Path = $ownerRecords.LegacyManifest }
+        )
+    } elseif ($continuityRuntime.receiptSource -eq 'offline-transfer') {
+        $repoScoped = @(
+            @{ Title = 'Imported Original Owner State'; Path = $continuityRuntime.receiptPaths.state },
+            @{ Title = 'Imported Original Owner Handoff'; Path = $continuityRuntime.receiptPaths.handoff },
+            @{ Title = 'Imported Original Owner Provenance'; Path = $continuityRuntime.receiptPaths.manifest }
+        )
+    }
     foreach ($item in $repoScoped) {
         $text = Read-OptionalText -Path (Join-Path $ContextRoot $item.Path)
         if ($null -ne $text) {
@@ -754,9 +774,10 @@ function Save-CheckpointJournal {
 }
 
 function Assert-CheckpointJournalFiles {
-    param([object]$Journal, [string]$Root, [string]$Revision = '')
+    param([object]$Journal, [string]$Root, [string]$Revision = '', [string[]]$OnlyPaths = @())
     foreach ($entry in @($Journal.files)) {
         $relative = [string]$entry.path
+        if ($OnlyPaths.Count -gt 0 -and $OnlyPaths -cnotcontains $relative) { continue }
         if ([IO.Path]::IsPathRooted($relative) -or $relative -match '(^|/)\.\.(/|$)') { throw 'CONTEXT_UNSYNCED: invalid checkpoint journal path.' }
         if ([string]::IsNullOrWhiteSpace($Revision)) {
             $path = Join-Path $Root $relative
@@ -784,13 +805,22 @@ function Complete-PendingCheckpoint {
     $scope = Get-SafeSlug -Value ([string]$checkpoint.scope)
     $repoSlug = Get-SafeSlug -Value $repo
     if ($repo -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$' -or [string]$Journal.id -notmatch '^[0-9a-f]{32}$' -or [string]$Journal.session -notmatch ('^sessions/[0-9]{4}/[0-9]{2}/[0-9]{4}-[0-9]{2}-[0-9]{2}-[0-9]{6}-' + [regex]::Escape($repoSlug + '-' + $scope + '-' + [string]$Journal.id) + '\.md$')) { throw 'CONTEXT_UNSYNCED: pending checkpoint session identity is invalid.' }
-    $requiredPaths = @([string]$Journal.session, "state/repositories/$repo.md", "handoffs/repositories/$repo.md", "manifests/repositories/$repo.json")
+    $ownerPaths = Get-ContinuityRecordPaths -Repository $repo -MemberRoot $memberRootFullPath
+    $requiredPaths = @([string]$Journal.session, $ownerPaths.State, $ownerPaths.Handoff, $ownerPaths.Manifest, $ownerPaths.LegacyState, $ownerPaths.LegacyHandoff, $ownerPaths.LegacyManifest)
     $allowedPaths = @($requiredPaths)
     if ([int]$checkpoint.schemaVersion -eq 2) {
         $requiredPaths += Get-ContinuityValidationLedgerPath -Repository $repo
         if ($null -ne $checkpoint.continuity.workstream) { $requiredPaths += Get-ContinuityWorkstreamRelativePath -Workstream $checkpoint.continuity.workstream }
         $allowedPaths = @($requiredPaths)
-        $previousText = Invoke-Git -WorkingDirectory $contextRoot -Arguments @('show', ([string]$Journal.baseCommit + ':manifests/repositories/' + $repo + '.json')) -AllowFailure
+        $previousText = Invoke-Git -WorkingDirectory $contextRoot -Arguments @('show', ([string]$Journal.baseCommit + ':' + $ownerPaths.Manifest)) -AllowFailure
+        if ($previousText.ExitCode -ne 0) {
+            $legacyText = Invoke-Git -WorkingDirectory $contextRoot -Arguments @('show', ([string]$Journal.baseCommit + ':' + $ownerPaths.LegacyManifest)) -AllowFailure
+            if ($legacyText.ExitCode -eq 0) {
+                $legacyPrevious = $legacyText.Output | ConvertFrom-Json
+                if ($legacyPrevious.PSObject.Properties.Name -contains 'memberWorktree' -and
+                    (Get-ContinuityNormalizedMemberRoot -MemberRoot ([string]$legacyPrevious.memberWorktree)) -ceq (Get-ContinuityNormalizedMemberRoot -MemberRoot $memberRootFullPath)) { $previousText = $legacyText }
+            }
+        }
         if ($previousText.ExitCode -eq 0) {
             $previousManifest = $previousText.Output | ConvertFrom-Json
             if ($previousManifest.PSObject.Properties.Name -contains 'continuity' -and $null -ne $previousManifest.continuity.workstreamPath) {
@@ -815,7 +845,7 @@ function Complete-PendingCheckpoint {
         if ($currentHead -cne [string]$Journal.baseCommit) {
             # A process can stop after Git commits but before its journal update.
             $parent = (Invoke-Git -WorkingDirectory $contextRoot -Arguments @('rev-parse','HEAD^')).Output
-            $candidate = (Invoke-Git -WorkingDirectory $contextRoot -Arguments @('show', ('HEAD:manifests/repositories/' + [string]$Journal.repository + '.json'))).Output | ConvertFrom-Json
+            $candidate = (Invoke-Git -WorkingDirectory $contextRoot -Arguments @('show', ('HEAD:' + $ownerPaths.Manifest))).Output | ConvertFrom-Json
             if ($parent -cne [string]$Journal.baseCommit -or [string]$candidate.checkpointId -cne [string]$Journal.id) { throw 'CONTEXT_UNSYNCED: context history changed before pending checkpoint commit; manual recovery required.' }
             Assert-CheckpointJournalFiles -Journal $Journal -Root $contextRoot -Revision $currentHead
             $Journal.commit = $currentHead
@@ -836,9 +866,10 @@ function Complete-PendingCheckpoint {
     if ($Journal.phase -notin @('committed','completed')) { throw 'CONTEXT_UNSYNCED: interrupted checkpoint preparation preserved; inspect journal and cache before manual recovery.' }
     if ([string]$Journal.commit -notmatch '^[0-9a-f]{40,64}$' -or -not (Test-GitAncestor -ContextRoot $contextRoot -Ancestor ([string]$Journal.commit) -Descendant 'HEAD')) { throw 'CONTEXT_UNSYNCED: pending checkpoint commit is not in the current context history.' }
     Assert-CheckpointJournalFiles -Journal $Journal -Root $contextRoot -Revision ([string]$Journal.commit)
-    $manifestText = (Invoke-Git -WorkingDirectory $contextRoot -Arguments @('show', ([string]$Journal.commit + ':manifests/repositories/' + [string]$Journal.repository + '.json'))).Output
+    $manifestText = (Invoke-Git -WorkingDirectory $contextRoot -Arguments @('show', ([string]$Journal.commit + ':' + $ownerPaths.Manifest))).Output
     $publishedManifest = $manifestText | ConvertFrom-Json
-    if ([string]$publishedManifest.checkpointId -cne [string]$Journal.id -or [string]$publishedManifest.checkpointPayloadSha256 -cne [string]$Journal.payloadSha256 -or [string]$publishedManifest.session -cne [string]$Journal.session -or [string]$publishedManifest.worktreeFingerprint -cne [string]$Journal.sourceFingerprint -or [string]$publishedManifest.memberWorktree -cne $memberRootFullPath) { throw 'CONTEXT_UNSYNCED: pending checkpoint provenance does not match its immutable journal.' }
+    if ([string]$publishedManifest.checkpointId -cne [string]$Journal.id -or [string]$publishedManifest.checkpointPayloadSha256 -cne [string]$Journal.payloadSha256 -or [string]$publishedManifest.session -cne [string]$Journal.session -or [string]$publishedManifest.worktreeFingerprint -cne [string]$Journal.sourceFingerprint -or [string]$publishedManifest.memberWorktree -cne $memberRootFullPath -or [string]$publishedManifest.worktreeId -cne $ownerPaths.WorktreeId -or
+        [string]$publishedManifest.receiptPaths.manifest -cne $ownerPaths.Manifest -or [string]$publishedManifest.receiptPaths.state -cne $ownerPaths.State -or [string]$publishedManifest.receiptPaths.handoff -cne $ownerPaths.Handoff) { throw 'CONTEXT_UNSYNCED: pending checkpoint provenance does not match its immutable journal.' }
     if (-not [string]::IsNullOrWhiteSpace((Invoke-Git -WorkingDirectory $contextRoot -Arguments @('status','--porcelain')).Output)) { throw 'CONTEXT_UNSYNCED: dirty context cache prevents checkpoint publication recovery.' }
     if (-not $Offline -and [bool]$config.behavior.pushContext) {
         Sync-CheckpointPush -ContextRoot $contextRoot -ExpectedBranch $expectedBranch -Remote $contextRemote
@@ -847,9 +878,21 @@ function Complete-PendingCheckpoint {
         $localCommit = (Invoke-Git -WorkingDirectory $contextRoot -Arguments @('rev-parse','HEAD')).Output
         if ($remoteCommit -cne $localCommit -or -not (Test-GitAncestor -ContextRoot $contextRoot -Ancestor ([string]$Journal.commit) -Descendant $remoteCommit)) { throw 'CONTEXT_UNSYNCED: checkpoint publication was not confirmed at the canonical remote.' }
     }
-    # Ancestor reachability alone cannot make a superseded owning-member record
-    # current. Every record captured by this operation must still match HEAD.
-    Assert-CheckpointJournalFiles -Journal $Journal -Root $contextRoot -Revision 'HEAD'
+    # Repository summaries are backward-compatible latest-writer views. A
+    # sibling may update them without invalidating this Worktree's receipt.
+    $currentPaths = @([string]$Journal.session, $ownerPaths.State, $ownerPaths.Handoff, $ownerPaths.Manifest)
+    if ([int]$checkpoint.schemaVersion -eq 2) {
+        if ($null -ne $checkpoint.continuity.workstream) { $currentPaths += Get-ContinuityWorkstreamRelativePath -Workstream $checkpoint.continuity.workstream }
+        $ledgerPath = Get-ContinuityValidationLedgerPath -Repository $repo
+        $committedLedger = (Invoke-Git -WorkingDirectory $contextRoot -Arguments @('show', ([string]$Journal.commit + ':' + $ledgerPath))).Output | ConvertFrom-Json
+        $currentLedger = Get-ContinuityValidationLedger -ContextRoot $contextRoot -Repository $repo
+        $oldEntries = @($committedLedger.entries); $newEntries = @($currentLedger.entries)
+        if ($newEntries.Count -lt $oldEntries.Count) { throw 'CONTEXT_UNSYNCED: validation ledger lost previously published entries.' }
+        for ($index = 0; $index -lt $oldEntries.Count; $index++) {
+            if (($oldEntries[$index] | ConvertTo-Json -Depth 30 -Compress) -cne ($newEntries[$index] | ConvertTo-Json -Depth 30 -Compress)) { throw 'CONTEXT_UNSYNCED: validation ledger entries changed after publication.' }
+        }
+    }
+    Assert-CheckpointJournalFiles -Journal $Journal -Root $contextRoot -Revision 'HEAD' -OnlyPaths $currentPaths
     $freshMember = Get-GitState -Root $memberRootFullPath
     if ($freshMember.fingerprint -cne [string]$Journal.sourceFingerprint -or $freshMember.head -cne [string]$Journal.sourceCommit -or $freshMember.branch -cne [string]$Journal.sourceBranch) { throw 'CONTEXT_UNSYNCED: source changed during checkpoint publication; published context is historical. Preserve journal and create an explicitly reviewed recovery checkpoint.' }
     Write-RuntimeBundle -MemberRoot $memberRootFullPath -ContextRoot $contextRoot -Config $config -ContextFreshness $checkpointFreshness | Out-Null
@@ -955,7 +998,8 @@ if ($Action -eq 'checkpoint') {
         if ($journal.phase -ne 'completed') { throw 'CONTEXT_UNSYNCED: a different payload or source cannot overwrite a pending checkpoint; preserve journal and cache for recovery.' }
     }
     if ($contextState.dirty) { throw 'Automated checkpoint refused because the central context cache has pre-existing uncommitted changes.' }
-    Assert-ContinuityTransition -ContextRoot $contextRoot -Checkpoint $checkpoint -Repository ([string]$config.repository)
+    Assert-ContinuityTransition -ContextRoot $contextRoot -Checkpoint $checkpoint -Repository ([string]$config.repository) -MemberRoot $memberRootFullPath
+    $ownershipTransfer = Get-ContinuityOfflineOwnershipTransfer -ContextRoot $contextRoot -Repository ([string]$config.repository) -MemberRoot $memberRootFullPath
     $now = Get-Date
     $generatedAt = $now.ToString('o')
     $year = $now.ToString('yyyy',[Globalization.CultureInfo]::InvariantCulture)
@@ -976,10 +1020,11 @@ if ($Action -eq 'checkpoint') {
         message = "chore(context): checkpoint $repoId $scopeSlug"; files = @()
     }
     Save-CheckpointJournal -Path $journalPath -Journal $journal
-    $stateRelative = "state/repositories/$repoId.md"
-    $handoffRelative = "handoffs/repositories/$repoId.md"
-    $manifestRelative = "manifests/repositories/$repoId.json"
-    $continuityResult = Write-ContinuityState -ContextRoot $contextRoot -Checkpoint $checkpoint -MemberState $memberState -GeneratedAt $generatedAt -SessionRelative $sessionRelative
+    $ownerPaths = Get-ContinuityRecordPaths -Repository $repoId -MemberRoot $memberRootFullPath
+    $stateRelative = $ownerPaths.State
+    $handoffRelative = $ownerPaths.Handoff
+    $manifestRelative = $ownerPaths.Manifest
+    $continuityResult = Write-ContinuityState -ContextRoot $contextRoot -Checkpoint $checkpoint -MemberState $memberState -GeneratedAt $generatedAt -SessionRelative $sessionRelative -MemberRoot $memberRootFullPath
 
     foreach ($relative in @($sessionRelative, $stateRelative, $handoffRelative, $manifestRelative)) {
         $parent = Split-Path -Parent (Join-Path $contextRoot $relative)
@@ -988,6 +1033,9 @@ if ($Action -eq 'checkpoint') {
 
     $sessionText = New-CheckpointMarkdown -Checkpoint $checkpoint -MemberState $memberState -GeneratedAt $generatedAt
     $sessionText += "`r`n`r`nCheckpoint ID: $checkpointId`r`nCheckpoint payload SHA256: $payloadSha256"
+    if ($null -ne $ownershipTransfer) {
+        $sessionText += "`r`n`r`n# Verified offline ownership transfer`r`n`r`n" + ($ownershipTransfer | ConvertTo-Json -Depth 8)
+    }
     Set-Content -LiteralPath (Join-Path $contextRoot $sessionRelative) -Value $sessionText -Encoding UTF8
 
     $continuityLines = @()
@@ -1087,13 +1135,20 @@ if ($Action -eq 'checkpoint') {
         checkpointId = $checkpointId
         checkpointPayloadSha256 = $payloadSha256
         memberWorktree = $memberRootFullPath
+        worktreeId = $ownerPaths.WorktreeId
+        receiptPaths = [pscustomobject]@{manifest=$ownerPaths.Manifest;state=$ownerPaths.State;handoff=$ownerPaths.Handoff}
     }
     if ($null -ne $continuityResult.Metadata) {
         $manifest['continuity'] = $continuityResult.Metadata
     }
+    if ($null -ne $ownershipTransfer) { $manifest['ownershipTransfer'] = $ownershipTransfer }
     $manifest | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $contextRoot $manifestRelative) -Encoding UTF8
-
-    $pathsToCommit = @($sessionRelative, $stateRelative, $handoffRelative, $manifestRelative) + @($continuityResult.Paths)
+    foreach ($pair in @(@($stateRelative,$ownerPaths.LegacyState),@($handoffRelative,$ownerPaths.LegacyHandoff),@($manifestRelative,$ownerPaths.LegacyManifest))) {
+        $destination = Join-Path $contextRoot $pair[1]
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $destination) | Out-Null
+        [IO.File]::WriteAllBytes($destination, [IO.File]::ReadAllBytes((Join-Path $contextRoot $pair[0])))
+    }
+    $pathsToCommit = @($sessionRelative, $stateRelative, $handoffRelative, $manifestRelative, $ownerPaths.LegacyState, $ownerPaths.LegacyHandoff, $ownerPaths.LegacyManifest) + @($continuityResult.Paths)
     $pathsToCommit = @($pathsToCommit | Select-Object -Unique)
     $journal.files = @($pathsToCommit | ForEach-Object {
         $relative = [string]$_

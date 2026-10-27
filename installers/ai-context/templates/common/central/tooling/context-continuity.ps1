@@ -185,11 +185,215 @@ function Get-ContinuityValidationLedger {
     return $ledger
 }
 
+function Get-ContinuityNormalizedMemberRoot {
+    param([string]$MemberRoot)
+    if ([string]::IsNullOrWhiteSpace($MemberRoot)) { throw 'An explicit owning MemberRoot is required for Worktree continuity.' }
+    return [IO.Path]::GetFullPath($MemberRoot).TrimEnd([char[]]@([char]92,[char]47)).Replace([char]92,[char]47).ToLowerInvariant()
+}
+
+function Get-ContinuityRecordPaths {
+    param([string]$Repository, [string]$MemberRoot)
+    $repo = Assert-ContinuityId -Value $Repository -Label 'Repository id'
+    $normalized = Get-ContinuityNormalizedMemberRoot -MemberRoot $MemberRoot
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try { $digest = ([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($normalized)))).Replace('-','').ToLowerInvariant() }
+    finally { $sha.Dispose() }
+    $id = 'wt-' + $digest.Substring(0,32)
+    return [pscustomobject]@{
+        WorktreeId = $id
+        Manifest = "manifests/worktrees/$repo/$id.json"
+        State = "state/worktrees/$repo/$id.md"
+        Handoff = "handoffs/worktrees/$repo/$id.md"
+        LegacyManifest = "manifests/repositories/$repo.json"
+        LegacyState = "state/repositories/$repo.md"
+        LegacyHandoff = "handoffs/repositories/$repo.md"
+    }
+}
+
+function Get-ContinuityTransferFileHash {
+    param([string]$Path)
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try { return ([BitConverter]::ToString($sha.ComputeHash([IO.File]::ReadAllBytes($Path)))).Replace('-','').ToLowerInvariant() }
+    finally { $sha.Dispose() }
+}
+
+function Get-ContinuityTransferSource {
+    param([string]$ContextRoot, [string]$Repository, [object]$Transfer)
+    $source = $Transfer.source
+    if ([int]$Transfer.schemaVersion -ne 2 -or [string]$Transfer.kind -cne 'qbit-ai-context-transfer' -or
+        [string]$Transfer.repository -cne $Repository -or [string]$Transfer.transferId -cnotmatch '^[0-9a-f]{32}$' -or
+        [string]$source.contextHead -cnotmatch '^[0-9a-f]{40,64}$' -or [string]$source.memberHead -cnotmatch '^[0-9a-f]{40,64}$' -or
+        [string]$source.worktreeFingerprint -cnotmatch '^[0-9a-f]{64}$') { throw 'Offline transfer source provenance is invalid.' }
+    $paths = Get-ContinuityRecordPaths -Repository $Repository -MemberRoot ([string]$source.memberWorktree)
+    if ([string]$source.worktreeId -cne $paths.WorktreeId) { throw 'Offline transfer source Worktree identity is invalid.' }
+    if ($null -eq $source.receipt) {
+        if ($null -ne $Transfer.continuity) { throw 'Offline transfer continuity requires an owning source receipt.' }
+        $anchoredReceipt = (Invoke-ContinuityGitText -Root $ContextRoot -Arguments ('ls-tree --name-only '+[string]$source.contextHead+' -- '+$paths.Manifest)).Trim()
+        if ($anchoredReceipt) { throw 'Offline transfer omitted an existing owning source receipt; preserve its continuation.' }
+        return [pscustomobject]@{ Manifest=$null; Paths=$paths }
+    }
+    $receipt = $source.receipt
+    if ([string]$receipt.manifest -cne $paths.Manifest -or [string]$receipt.state -cne $paths.State -or [string]$receipt.handoff -cne $paths.Handoff -or
+        [string]$receipt.session -cnotmatch '^sessions/[0-9]{4}/[0-9]{2}/[A-Za-z0-9._-]+\.md$') { throw 'Offline transfer source receipt paths are invalid.' }
+    $anchor = [string]$source.contextHead
+    foreach ($pair in @(@($paths.Manifest,'manifestBlob'),@($paths.State,'stateBlob'),@($paths.Handoff,'handoffBlob'),@([string]$receipt.session,'sessionBlob'))) {
+        $blob = (Invoke-ContinuityGitText -Root $ContextRoot -Arguments ("rev-parse ${anchor}:"+$pair[0])).Trim()
+        if ($blob -cne [string]$receipt.($pair[1])) { throw 'Offline transfer source receipt blob does not match its Git anchor.' }
+        # Anchored source records must still be present, unchanged. An unrelated
+        # sibling summary may advance; it is never the transfer authority.
+        Invoke-ContinuityGitText -Root $ContextRoot -Arguments ("diff --quiet $anchor -- "+$pair[0]) | Out-Null
+        $currentPath = Join-Path $ContextRoot $pair[0]
+        if (-not (Test-Path -LiteralPath $currentPath -PathType Leaf)) { throw 'Offline transfer source receipt is missing.' }
+    }
+    $manifestText = Invoke-ContinuityGitText -Root $ContextRoot -Arguments ("show ${anchor}:"+$paths.Manifest)
+    $manifest = $manifestText | ConvertFrom-Json
+    if ([string]$manifest.repository -cne $Repository -or [string]$manifest.worktreeId -cne $paths.WorktreeId -or
+        (Get-ContinuityNormalizedMemberRoot -MemberRoot ([string]$manifest.memberWorktree)) -cne (Get-ContinuityNormalizedMemberRoot -MemberRoot ([string]$source.memberWorktree)) -or
+        [string]$manifest.receiptPaths.manifest -cne $paths.Manifest -or [string]$manifest.receiptPaths.state -cne $paths.State -or [string]$manifest.receiptPaths.handoff -cne $paths.Handoff -or
+        [string]$manifest.commit -cne [string]$source.memberHead -or [string]$manifest.branch -cne [string]$source.memberBranch -or
+        [string]$manifest.worktreeFingerprint -cne [string]$source.worktreeFingerprint -or [string]$manifest.session -cne [string]$receipt.session -or
+        [string]$manifest.checkpointId -cne [string]$receipt.checkpointId -or [string]$manifest.checkpointPayloadSha256 -cne [string]$receipt.payloadSha256) { throw 'Offline transfer source Manifest identity does not match its provenance.' }
+    $meta = if ($manifest.PSObject.Properties.Name -contains 'continuity') { $manifest.continuity } else { $null }
+    if (($meta | ConvertTo-Json -Depth 12 -Compress) -cne ($Transfer.continuity | ConvertTo-Json -Depth 12 -Compress)) { throw 'Offline transfer continuity does not match the anchored owning Manifest.' }
+    $session = Invoke-ContinuityGitText -Root $ContextRoot -Arguments ("show ${anchor}:"+[string]$receipt.session)
+    if (-not $session.Contains('Checkpoint ID: '+[string]$manifest.checkpointId) -or
+        -not $session.Contains('Checkpoint payload SHA256: '+[string]$manifest.checkpointPayloadSha256)) { throw 'Offline transfer Session does not match the owning checkpoint.' }
+    return [pscustomobject]@{ Manifest=$manifest; Paths=$paths }
+}
+
+function New-ContinuityOfflineOwnershipTransfer {
+    param([string]$ContextRoot, [string]$Repository, [string]$MemberRoot, [object]$Transfer, [string]$ManifestPath, [string]$BundlePath, [switch]$Importing)
+    $source = Get-ContinuityTransferSource -ContextRoot $ContextRoot -Repository $Repository -Transfer $Transfer
+    $target = Get-ContinuityRecordPaths -Repository $Repository -MemberRoot $MemberRoot
+    if ($Importing) {
+        $memberHead = (Invoke-ContinuityGitText -Root $MemberRoot -Arguments 'rev-parse HEAD').Trim()
+        $memberBranch = (Invoke-ContinuityGitText -Root $MemberRoot -Arguments 'rev-parse --abbrev-ref HEAD').Trim()
+        if ($memberHead -cne [string]$Transfer.source.memberHead -or $memberBranch -cne [string]$Transfer.source.memberBranch -or
+            (Get-ContinuityFingerprint -Root $MemberRoot) -cne [string]$Transfer.source.worktreeFingerprint) { throw 'Offline transfer target source HEAD/branch/fingerprint does not match the exported owner.' }
+    }
+    if ($null -eq $source.Manifest -or $target.WorktreeId -ceq $source.Paths.WorktreeId) { return $null }
+    if ($Importing -and (Test-Path -LiteralPath (Join-Path $ContextRoot $target.Manifest))) { throw 'Offline transfer cannot replace an established target Worktree receipt.' }
+    return [pscustomobject][ordered]@{
+        schemaVersion=1; kind='qbit-ai-context-worktree-transfer'; transferId=[string]$Transfer.transferId; repository=$Repository
+        transferManifestSha256=(Get-ContinuityTransferFileHash -Path $ManifestPath); bundleSha256=(Get-ContinuityTransferFileHash -Path $BundlePath)
+        sourceContextHead=[string]$Transfer.source.contextHead; sourceMemberHead=[string]$Transfer.source.memberHead; sourceMemberBranch=[string]$Transfer.source.memberBranch
+        sourceMemberWorktree=[string]$Transfer.source.memberWorktree; sourceWorktreeId=$source.Paths.WorktreeId
+        sourceManifest=$source.Paths.Manifest; sourceSession=[string]$source.Manifest.session
+        targetMemberWorktree=[IO.Path]::GetFullPath($MemberRoot); targetWorktreeId=$target.WorktreeId
+    }
+}
+
+function Get-ContinuityOfflineOwnershipTransfer {
+    param([string]$ContextRoot, [string]$Repository, [string]$MemberRoot)
+    $markerPath = Join-Path $MemberRoot '.ai-bridge/context-offline.json'
+    if (-not (Test-Path -LiteralPath $markerPath -PathType Leaf)) { return $null }
+    $marker = Read-ContinuityJson -Path $markerPath
+    if ([int]$marker.schemaVersion -eq 1) { return $null }
+    if ([int]$marker.schemaVersion -ne 2 -or [string]$marker.kind -cne 'qbit-ai-context-offline' -or
+        [string]$marker.repository -cne $Repository -or -not ($marker.PSObject.Properties.Name -contains 'ownershipTransfer')) { throw 'Offline transfer marker mapping is invalid.' }
+    $transferRoot = Join-Path $MemberRoot '.ai-bridge/context-transfer'
+    $manifestPath = Join-Path $transferRoot 'manifest.json'; $bundlePath = Join-Path $transferRoot 'context.bundle'
+    foreach ($path in @($markerPath,$transferRoot,$manifestPath,$bundlePath)) {
+        if (-not (Test-Path -LiteralPath $path) -or (((Get-Item -LiteralPath $path -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)) { throw 'Offline transfer mapping requires retained regular transfer files.' }
+    }
+    $transfer = Read-ContinuityJson -Path $manifestPath
+    if ([string]$marker.sourceContextHead -cnotmatch '^[0-9a-f]{40,64}$' -or
+        [string]$marker.currentContextHead -cnotmatch '^[0-9a-f]{40,64}$' -or
+        [string]$marker.contextBranch -notmatch '^[A-Za-z0-9._/-]+$' -or [string]$marker.contextBranch -match '\.\.|//|^/|/$') { throw 'Offline transfer marker Git identity is invalid.' }
+    # The launcher checks exact marker HEAD before invocation and advances it
+    # after a successful offline commit. Runtime generation inside that commit
+    # must also accept its non-destructive descendant before the marker update.
+    Invoke-ContinuityGitText -Root $ContextRoot -Arguments ('merge-base --is-ancestor '+[string]$marker.currentContextHead+' HEAD') | Out-Null
+    if ([string]$transfer.project -cne [string]$marker.project -or [string]$transfer.contextBranch -cne [string]$marker.contextBranch -or
+        [string]$transfer.contextRemote -cne [string]$marker.contextRemote -or [string]$transfer.source.contextHead -cne [string]$marker.sourceContextHead -or
+        [string]$transfer.bundle.sha256 -cne [string]$marker.bundleSha256 -or
+        (Get-ContinuityTransferFileHash -Path $bundlePath) -cne [string]$marker.bundleSha256 -or (Get-Item -LiteralPath $bundlePath).Length -ne [long]$transfer.bundle.bytes) { throw 'Offline transfer mapping does not match its retained bundle/manifest.' }
+    Invoke-ContinuityGitText -Root $MemberRoot -Arguments ('bundle verify "'+$bundlePath+'"') | Out-Null
+    $heads = (Invoke-ContinuityGitText -Root $MemberRoot -Arguments ('bundle list-heads "'+$bundlePath+'" refs/heads/'+[string]$marker.contextBranch)).Trim() -split '\s+'
+    if ($heads.Count -ne 2 -or $heads[0] -cne [string]$marker.sourceContextHead -or $heads[1] -cne ('refs/heads/'+[string]$marker.contextBranch)) { throw 'Offline transfer bundle branch does not match its source anchor.' }
+    Invoke-ContinuityGitText -Root $ContextRoot -Arguments ('merge-base --is-ancestor '+[string]$marker.sourceContextHead+' HEAD') | Out-Null
+    $expected = New-ContinuityOfflineOwnershipTransfer -ContextRoot $ContextRoot -Repository $Repository -MemberRoot $MemberRoot -Transfer $transfer -ManifestPath $manifestPath -BundlePath $bundlePath
+    $actual = $marker.ownershipTransfer
+    if (($null -eq $expected) -ne ($null -eq $actual)) { throw 'Offline transfer ownership mapping is missing or unexpected.' }
+    if ($null -ne $expected) {
+        if (@($actual.PSObject.Properties).Count -ne @($expected.PSObject.Properties).Count) { throw 'Offline transfer ownership mapping shape is invalid.' }
+        foreach ($property in $expected.PSObject.Properties) {
+            if (-not ($actual.PSObject.Properties.Name -contains $property.Name) -or [string]$actual.($property.Name) -cne [string]$property.Value) { throw 'Offline transfer ownership mapping does not match its verified source and target.' }
+        }
+    }
+    return $expected
+}
+
 function Get-ContinuityPrevious {
-    param([string]$ContextRoot, [string]$Repository)
-    $manifest = Read-ContinuityJson -Path (Join-Path $ContextRoot "manifests/repositories/$Repository.json")
+    param([string]$ContextRoot, [string]$Repository, [string]$MemberRoot)
+    $paths = Get-ContinuityRecordPaths -Repository $Repository -MemberRoot $MemberRoot
+    $transfer = Get-ContinuityOfflineOwnershipTransfer -ContextRoot $ContextRoot -Repository $Repository -MemberRoot $MemberRoot
+    $receiptMemberRoot = $MemberRoot
+    foreach ($relative in @($paths.Manifest,$paths.LegacyManifest,$paths.State,$paths.Handoff,'workstreams/active')) {
+        $checkedPath = [IO.Path]::GetFullPath($ContextRoot)
+        foreach ($segment in $relative.Split('/')) {
+            $checkedPath = Join-Path $checkedPath $segment
+            if ((Test-Path -LiteralPath $checkedPath) -and
+                (((Get-Item -LiteralPath $checkedPath -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)) { throw 'Worktree Manifest path must not traverse a reparse point.' }
+        }
+    }
+    $manifest = Read-ContinuityJson -Path (Join-Path $ContextRoot $paths.Manifest)
+    $source = 'scoped'
+    if ($null -eq $manifest) {
+        # A sibling's latest summary is not evidence that this Worktree never
+        # checkpointed. Preserve incomplete owning records rather than permit
+        # a fresh snapshot to silently drop its unresolved continuation.
+        foreach ($relative in @($paths.State,$paths.Handoff)) {
+            if (Test-Path -LiteralPath (Join-Path $ContextRoot $relative)) {
+                throw 'Scoped Worktree Context Manifest is missing while owning continuity records remain; preserve them and recover the authoritative receipt.'
+            }
+        }
+        $activeRoot = Join-Path $ContextRoot 'workstreams/active'
+        if (Test-Path -LiteralPath $activeRoot -PathType Container) {
+            foreach ($file in @(Get-ChildItem -LiteralPath $activeRoot -Filter '*.json' -File)) {
+                if (($file.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'Active Workstream path must not traverse a reparse point.' }
+                $active = Read-ContinuityJson -Path $file.FullName
+                if ($null -eq $active -or -not ($active.PSObject.Properties.Name -contains 'lastCheckpoint') -or $null -eq $active.lastCheckpoint) { continue }
+                $owner = $active.lastCheckpoint
+                if ([string]$owner.repository -cne $Repository) { continue }
+                $matchesId = ($owner.PSObject.Properties.Name -contains 'worktreeId') -and [string]$owner.worktreeId -ceq $paths.WorktreeId
+                $matchesRoot = ($owner.PSObject.Properties.Name -contains 'memberWorktree') -and
+                    -not [string]::IsNullOrWhiteSpace([string]$owner.memberWorktree) -and
+                    (Get-ContinuityNormalizedMemberRoot -MemberRoot ([string]$owner.memberWorktree)) -ceq (Get-ContinuityNormalizedMemberRoot -MemberRoot $MemberRoot)
+                if ($matchesId -or $matchesRoot) {
+                    throw 'Scoped Worktree Context Manifest is missing while an owning active Workstream remains; preserve it and recover the authoritative receipt.'
+                }
+            }
+        }
+        $source = 'none'
+        if ($null -ne $transfer) {
+            $manifest = Read-ContinuityJson -Path (Join-Path $ContextRoot $transfer.sourceManifest)
+            $source = 'offline-transfer'
+            $receiptMemberRoot = [string]$transfer.sourceMemberWorktree
+        }
+        $legacy = Read-ContinuityJson -Path (Join-Path $ContextRoot $paths.LegacyManifest)
+        if ($null -eq $manifest -and $null -ne $legacy) {
+            if ($legacy.PSObject.Properties.Name -contains 'memberWorktree' -and -not [string]::IsNullOrWhiteSpace([string]$legacy.memberWorktree)) {
+                if ((Get-ContinuityNormalizedMemberRoot -MemberRoot ([string]$legacy.memberWorktree)) -ceq (Get-ContinuityNormalizedMemberRoot -MemberRoot $MemberRoot)) {
+                    if (($legacy.PSObject.Properties.Name -contains 'worktreeId') -or ($legacy.PSObject.Properties.Name -contains 'receiptPaths')) {
+                        throw 'Scoped Worktree Context Manifest is missing; a repository summary cannot replace the authoritative receipt.'
+                    }
+                    $manifest = $legacy; $source = 'bound-legacy'
+                }
+            } elseif ($legacy.PSObject.Properties.Name -contains 'continuity' -and $null -ne $legacy.continuity -and
+                [string]$legacy.continuity.mode -eq 'tracked' -and $script:ContinuityTerminalWorkstreamStatuses -notcontains [string]$legacy.continuity.workstreamStatus) {
+                throw 'Legacy active Context has no owning Worktree binding; preserve it and perform an explicitly reviewed mapping before continuation.'
+            }
+        }
+    }
+    if ($null -ne $manifest) {
+        if ([string]$manifest.repository -cne $Repository -or
+            (Get-ContinuityNormalizedMemberRoot -MemberRoot ([string]$manifest.memberWorktree)) -cne (Get-ContinuityNormalizedMemberRoot -MemberRoot $receiptMemberRoot)) { throw 'Worktree Context Manifest owner does not match the selected repository/root.' }
+        if ($source -eq 'scoped' -and ([string]$manifest.worktreeId -cne $paths.WorktreeId -or
+            [string]$manifest.receiptPaths.manifest -cne $paths.Manifest -or [string]$manifest.receiptPaths.state -cne $paths.State -or [string]$manifest.receiptPaths.handoff -cne $paths.Handoff)) { throw 'Worktree Context Manifest receipt paths do not match the canonical owning scope.' }
+    }
     if ($null -eq $manifest -or -not ($manifest.PSObject.Properties.Name -contains 'continuity') -or $null -eq $manifest.continuity) {
-        return [pscustomobject]@{ Manifest = $manifest; Workstream = $null }
+        return [pscustomobject]@{ Manifest = $manifest; Workstream = $null; ReceiptSource = $source }
     }
     $relative = [string]$manifest.continuity.workstreamPath
     $workstream = $null
@@ -209,10 +413,16 @@ function Get-ContinuityPrevious {
         $workstream = Read-ContinuityJson -Path (Join-Path $ContextRoot $relative)
         if ($null -eq $workstream -or [string]$workstream.id -cne $id -or
             [string]$workstream.status -cne [string]$manifest.continuity.workstreamStatus) { throw 'Previous workstream identity/status does not match its manifest.' }
+        if (-not ($workstream.PSObject.Properties.Name -contains 'lastCheckpoint') -or [string]$workstream.lastCheckpoint.repository -cne $Repository) { throw 'Previous workstream checkpoint owner does not match its Manifest.' }
+        if ([string]$workstream.lastCheckpoint.session -cne [string]$manifest.session) { throw 'Previous workstream Session does not match its Manifest.' }
+        if ($workstream.lastCheckpoint.PSObject.Properties.Name -contains 'memberWorktree') {
+            $receiptPaths = Get-ContinuityRecordPaths -Repository $Repository -MemberRoot $receiptMemberRoot
+            if ((Get-ContinuityNormalizedMemberRoot -MemberRoot ([string]$workstream.lastCheckpoint.memberWorktree)) -cne (Get-ContinuityNormalizedMemberRoot -MemberRoot $receiptMemberRoot) -or [string]$workstream.lastCheckpoint.worktreeId -cne $receiptPaths.WorktreeId) { throw 'Previous workstream belongs to another owning Worktree.' }
+        }
     } elseif (-not [string]::IsNullOrWhiteSpace([string]$manifest.continuity.workstreamId)) {
         throw 'Previous workstream manifest declares an id without a canonical path.'
     }
-    return [pscustomobject]@{ Manifest = $manifest; Workstream = $workstream }
+    return [pscustomobject]@{ Manifest = $manifest; Workstream = $workstream; ReceiptSource = $source }
 }
 
 function Test-ContinuityWorkstreamUnresolved {
@@ -344,7 +554,8 @@ function Assert-ContinuityCheckpointShape {
 }
 
 function Get-ContinuityGlobalWorkstream {
-    param([string]$ContextRoot, [string]$Id, [string]$Repository)
+    param([string]$ContextRoot, [string]$Id, [string]$Repository, [string]$MemberRoot)
+    $ownerPaths = Get-ContinuityRecordPaths -Repository $Repository -MemberRoot $MemberRoot
     $safeId = Assert-ContinuityId -Value $Id -Label 'Workstream id'
     $found = @()
     foreach ($bucket in @('active','archive')) {
@@ -368,6 +579,19 @@ function Get-ContinuityGlobalWorkstream {
             [string]$record.lastCheckpoint.repository -cne $Repository) {
             throw 'Global workstream id belongs to another checkpoint owner; preserve it and use an explicitly reviewed distinct id.'
         }
+        if ($record.lastCheckpoint.PSObject.Properties.Name -contains 'memberWorktree') {
+            if ((Get-ContinuityNormalizedMemberRoot -MemberRoot ([string]$record.lastCheckpoint.memberWorktree)) -cne (Get-ContinuityNormalizedMemberRoot -MemberRoot $MemberRoot) -or
+                [string]$record.lastCheckpoint.worktreeId -cne $ownerPaths.WorktreeId) {
+                $transfer = Get-ContinuityOfflineOwnershipTransfer -ContextRoot $ContextRoot -Repository $Repository -MemberRoot $MemberRoot
+                if ($null -eq $transfer -or [string]$record.lastCheckpoint.repository -cne [string]$transfer.repository -or
+                    [string]$record.lastCheckpoint.worktreeId -cne [string]$transfer.sourceWorktreeId -or
+                    (Get-ContinuityNormalizedMemberRoot -MemberRoot ([string]$record.lastCheckpoint.memberWorktree)) -cne (Get-ContinuityNormalizedMemberRoot -MemberRoot ([string]$transfer.sourceMemberWorktree)) -or
+                    [string]$record.lastCheckpoint.session -cne [string]$transfer.sourceSession) { throw 'Global workstream id belongs to another owning Worktree; preserve it and use an explicitly reviewed distinct id.' }
+            }
+        } else {
+            $bound = Get-ContinuityPrevious -ContextRoot $ContextRoot -Repository $Repository -MemberRoot $MemberRoot
+            if ($null -eq $bound.Manifest -or [string]$bound.Manifest.session -cne [string]$record.lastCheckpoint.session) { throw 'Legacy global workstream owner is unbound; preserve it for an explicitly reviewed Worktree mapping.' }
+        }
         $found += $record
     }
     if ($found.Count -gt 1) { throw 'Global workstream id exists in both active and archive; manual reconciliation is required.' }
@@ -376,7 +600,7 @@ function Get-ContinuityGlobalWorkstream {
 }
 
 function Assert-ContinuityTransition {
-    param([string]$ContextRoot, [object]$Checkpoint, [string]$Repository)
+    param([string]$ContextRoot, [object]$Checkpoint, [string]$Repository, [string]$MemberRoot)
     if ([int]$Checkpoint.schemaVersion -eq 2) {
         $ledger = Get-ContinuityValidationLedger -ContextRoot $ContextRoot -Repository $Repository
         $existing = @{}
@@ -384,9 +608,9 @@ function Assert-ContinuityTransition {
         $duplicates = @($Checkpoint.continuity.validationLedger | Where-Object { $existing.ContainsKey([string]$_.id) } | ForEach-Object { [string]$_.id })
         if ($duplicates.Count -gt 0) { throw ('Validation ledger entry ids are immutable and already exist: ' + ($duplicates -join ', ')) }
     }
-    $previous = Get-ContinuityPrevious -ContextRoot $ContextRoot -Repository $Repository
+    $previous = Get-ContinuityPrevious -ContextRoot $ContextRoot -Repository $Repository -MemberRoot $MemberRoot
     if ([int]$Checkpoint.schemaVersion -eq 2 -and $null -ne $Checkpoint.continuity.workstream) {
-        $target = Get-ContinuityGlobalWorkstream -ContextRoot $ContextRoot -Id ([string]$Checkpoint.continuity.workstream.id) -Repository $Repository
+        $target = Get-ContinuityGlobalWorkstream -ContextRoot $ContextRoot -Id ([string]$Checkpoint.continuity.workstream.id) -Repository $Repository -MemberRoot $MemberRoot
         if ($null -ne $target) {
             if ($null -ne $previous.Workstream -and [string]$previous.Workstream.id -cne [string]$target.id -and
                 (Test-ContinuityWorkstreamUnresolved -Workstream $previous.Workstream)) {
@@ -437,11 +661,12 @@ function Write-ContinuityJson {
 }
 
 function Write-ContinuityState {
-    param([string]$ContextRoot, [object]$Checkpoint, [object]$MemberState, [string]$GeneratedAt, [string]$SessionRelative)
+    param([string]$ContextRoot, [object]$Checkpoint, [object]$MemberState, [string]$GeneratedAt, [string]$SessionRelative, [string]$MemberRoot)
     if ([int]$Checkpoint.schemaVersion -ne 2) { return [pscustomobject]@{ Metadata = $null; Paths = @() } }
     $repository = [string]$Checkpoint.repository
     # Validate previous provenance before any ledger or Workstream writes.
-    $previous = Get-ContinuityPrevious -ContextRoot $ContextRoot -Repository $repository
+    $pathsForOwner = Get-ContinuityRecordPaths -Repository $repository -MemberRoot $MemberRoot
+    $previous = Get-ContinuityPrevious -ContextRoot $ContextRoot -Repository $repository -MemberRoot $MemberRoot
     $previousRelative = if ($null -ne $previous.Manifest -and $previous.Manifest.PSObject.Properties.Name -contains 'continuity') { [string]$previous.Manifest.continuity.workstreamPath } else { '' }
     $ledgerRelative = Get-ContinuityValidationLedgerPath -Repository $repository
     $ledger = Get-ContinuityValidationLedger -ContextRoot $ContextRoot -Repository $repository
@@ -451,7 +676,7 @@ function Write-ContinuityState {
         $stored = [ordered]@{}
         foreach ($property in $source.PSObject.Properties) { $stored[$property.Name] = $property.Value }
         $stored['recordedAt'] = $GeneratedAt
-        $stored['validFor'] = [ordered]@{ head = $MemberState.head; dirty = $MemberState.dirty; fingerprint = $MemberState.fingerprint }
+        $stored['validFor'] = [ordered]@{ head = $MemberState.head; dirty = $MemberState.dirty; fingerprint = $MemberState.fingerprint; memberWorktree = $MemberRoot; worktreeId = $pathsForOwner.WorktreeId }
         $entries += [pscustomobject]$stored
     }
     $ledgerOut = [ordered]@{ schemaVersion = 2; repository = $repository; entries = @($entries); updatedAt = $GeneratedAt }
@@ -466,7 +691,9 @@ function Write-ContinuityState {
         foreach ($property in $workstream.PSObject.Properties) { $storedWorkstream[$property.Name] = $property.Value }
         $storedWorkstream['schemaVersion'] = 2
         $storedWorkstream['updatedAt'] = $GeneratedAt
-        $storedWorkstream['lastCheckpoint'] = [ordered]@{ repository = $repository; branch = $MemberState.branch; head = $MemberState.head; dirty = $MemberState.dirty; fingerprint = $MemberState.fingerprint; session = $SessionRelative }
+        $storedWorkstream['lastCheckpoint'] = [ordered]@{ repository = $repository; memberWorktree = $MemberRoot; worktreeId = $pathsForOwner.WorktreeId; branch = $MemberState.branch; head = $MemberState.head; dirty = $MemberState.dirty; fingerprint = $MemberState.fingerprint; session = $SessionRelative }
+        $ownershipTransfer = Get-ContinuityOfflineOwnershipTransfer -ContextRoot $ContextRoot -Repository $repository -MemberRoot $MemberRoot
+        if ($null -ne $ownershipTransfer) { $storedWorkstream['lastCheckpoint']['ownershipTransfer'] = $ownershipTransfer }
         Write-ContinuityJson -Path (Join-Path $ContextRoot $workstreamRelative) -Value $storedWorkstream
         $paths += $workstreamRelative
     }
@@ -496,16 +723,22 @@ function Write-ContinuityState {
 }
 
 function Get-ContinuityRuntime {
-    param([string]$ContextRoot, [string]$Repository, [object]$MemberState)
-    $previous = Get-ContinuityPrevious -ContextRoot $ContextRoot -Repository $Repository
+    param([string]$ContextRoot, [string]$Repository, [object]$MemberState, [string]$MemberRoot)
+    $ownerPaths = Get-ContinuityRecordPaths -Repository $Repository -MemberRoot $MemberRoot
+    $previous = Get-ContinuityPrevious -ContextRoot $ContextRoot -Repository $Repository -MemberRoot $MemberRoot
     $meta = if ($null -ne $previous.Manifest -and $previous.Manifest.PSObject.Properties.Name -contains 'continuity') { $previous.Manifest.continuity } else { $null }
     $ledger = Get-ContinuityValidationLedger -ContextRoot $ContextRoot -Repository $Repository
     $fresh = 0
     $stale = 0
     foreach ($entry in @($ledger.entries)) {
-        if ($entry.PSObject.Properties.Name -contains 'validFor' -and [string]$entry.validFor.fingerprint -eq [string]$MemberState.fingerprint) { $fresh++ } else { $stale++ }
+        if ($entry.PSObject.Properties.Name -contains 'validFor' -and [string]$entry.validFor.fingerprint -eq [string]$MemberState.fingerprint -and
+            $entry.validFor.PSObject.Properties.Name -contains 'worktreeId' -and [string]$entry.validFor.worktreeId -ceq $ownerPaths.WorktreeId) { $fresh++ } else { $stale++ }
     }
-    $mostRecent = if (@($ledger.entries).Count -gt 0) { @($ledger.entries)[-1] } else { $null }
+    $ownEntries = @($ledger.entries | Where-Object {
+        $_.PSObject.Properties.Name -contains 'validFor' -and $_.validFor.PSObject.Properties.Name -contains 'worktreeId' -and
+        [string]$_.validFor.worktreeId -ceq $ownerPaths.WorktreeId
+    })
+    $mostRecent = if ($ownEntries.Count -gt 0) { $ownEntries[-1] } else { $null }
     return [pscustomobject]@{
         mode = if ($null -ne $meta) { [string]$meta.mode } else { 'legacy' }
         workstreamId = if ($null -ne $meta) { $meta.workstreamId } else { $null }
@@ -513,6 +746,9 @@ function Get-ContinuityRuntime {
         currentItemId = if ($null -ne $meta) { $meta.currentItemId } else { $null }
         workstreamPath = if ($null -ne $meta) { $meta.workstreamPath } else { $null }
         workstream = $previous.Workstream
+        worktreeId = $ownerPaths.WorktreeId
+        receiptPaths = if ($previous.ReceiptSource -eq 'offline-transfer') { $previous.Manifest.receiptPaths } else { [pscustomobject]@{manifest=$ownerPaths.Manifest;state=$ownerPaths.State;handoff=$ownerPaths.Handoff} }
+        receiptSource = $previous.ReceiptSource
         validation = [pscustomobject]@{ path = (Get-ContinuityValidationLedgerPath -Repository $Repository); entries = @($ledger.entries).Count; freshEntries = $fresh; staleEntries = $stale; mostRecent = $mostRecent }
     }
 }
