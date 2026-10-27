@@ -324,9 +324,132 @@ function Get-ContinuityOfflineOwnershipTransfer {
     return $expected
 }
 
+# The same validator is embedded in the central engine and strict member gate.
+# It reads committed coordination evidence; it never manufactures an owner receipt.
+function Invoke-ContinuityReviewGit([string]$Root,[string[]]$Arguments,[switch]$AllowFailure) {
+    $old=$ErrorActionPreference; $ErrorActionPreference='Continue'
+    try { $output=@(& git.exe -c core.longpaths=true -C $Root @Arguments 2>&1); $code=$LASTEXITCODE }
+    finally { $ErrorActionPreference=$old }
+    if($code -ne 0 -and -not $AllowFailure){throw 'CONTEXT_UNSYNCED: reviewed legacy Git provenance could not be verified.'}
+    return [pscustomobject]@{Code=$code;Text=($output -join "`n").Trim()}
+}
+function Test-ContinuityReviewWorkingBlob([string]$Root,[string]$Path,[string]$Blob) {
+    if(-not(Test-Path -LiteralPath (Join-Path $Root $Path) -PathType Leaf)){return $false}
+    # A clone may check out LF blobs as CRLF, while historical blobs may already
+    # contain CRLF. Accept the exact raw or Git-cleaned blob, never trimmed text.
+    $raw=(Invoke-ContinuityReviewGit $Root @('hash-object','--no-filters','--',$Path)).Text
+    return $raw -ceq $Blob -or (Invoke-ContinuityReviewGit $Root @('hash-object','--',$Path)).Text -ceq $Blob
+}
+function Assert-ContinuityReviewKeys($Value,[string[]]$Keys) {
+    if($null -eq $Value -or $Value -isnot [pscustomobject]){throw 'CONTEXT_UNSYNCED: reviewed legacy record shape is invalid.'}
+    $actual=@($Value.PSObject.Properties.Name|Sort-Object);$expected=@($Keys|Sort-Object)
+    if(($actual -join '|') -cne ($expected -join '|')){throw 'CONTEXT_UNSYNCED: reviewed legacy record has missing or unknown fields.'}
+}
+function Assert-ContinuityReviewPath([string]$Root,[string]$Relative) {
+    if($Relative -notmatch '^[A-Za-z0-9._/-]+$' -or $Relative -match '(^|/)\.\.(/|$)|//|^/|/$|\\'){throw 'CONTEXT_UNSYNCED: reviewed legacy path is unsafe.'}
+    $current=[IO.Path]::GetFullPath($Root)
+    foreach($part in $Relative.Split('/')) {
+        $current=Join-Path $current $part
+        if((Test-Path -LiteralPath $current) -and (((Get-Item -LiteralPath $current -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)){throw 'CONTEXT_UNSYNCED: reviewed legacy path traverses a reparse point.'}
+    }
+}
+function Get-ContinuityReviewWorktreeId([string]$MemberRoot) {
+    $normalized=[IO.Path]::GetFullPath($MemberRoot).TrimEnd([char[]]@([char]92,[char]47)).Replace([char]92,[char]47).ToLowerInvariant()
+    $sha=[Security.Cryptography.SHA256]::Create()
+    try {$digest=([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($normalized)))).Replace('-','').ToLowerInvariant()}
+    finally {$sha.Dispose()}
+    return 'wt-'+$digest.Substring(0,32)
+}
+function Get-ContinuityLegacyReview([string]$ContextRoot,[string]$Repository,[string]$MemberRoot) {
+    if($Repository -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$'){throw 'CONTEXT_UNSYNCED: reviewed legacy repository identity is invalid.'}
+    $relative='references/continuity-reconciliations/'+$Repository+'.json'
+    Assert-ContinuityReviewPath $ContextRoot $relative
+    $recordPath=Join-Path $ContextRoot $relative
+    $blob=Invoke-ContinuityReviewGit $ContextRoot @('rev-parse',('HEAD:'+$relative)) -AllowFailure
+    if($blob.Code -ne 0) {
+        if(Test-Path -LiteralPath $recordPath){throw 'CONTEXT_UNSYNCED: legacy reconciliation must be canonically committed before enrollment.'}
+        return $null
+    }
+    if(-not(Test-ContinuityReviewWorkingBlob $ContextRoot $relative $blob.Text)){throw 'CONTEXT_UNSYNCED: legacy reconciliation differs from its committed record.'}
+    $record=(Invoke-ContinuityReviewGit $ContextRoot @('show',('HEAD:'+$relative))).Text|ConvertFrom-Json
+    Assert-ContinuityReviewKeys $record @('schemaVersion','kind','project','repository','contextRemote','baseCommit','review','legacy','workstream','enrollments')
+    if($record.schemaVersion -ne 1 -or [string]$record.kind -cne 'independent-root-enrollment' -or [string]$record.repository -cne $Repository){throw 'CONTEXT_UNSYNCED: reviewed legacy identity or schema is invalid.'}
+    Assert-ContinuityReviewPath $MemberRoot '.ai/context/config.json'
+    $config=Get-Content -LiteralPath (Join-Path $MemberRoot '.ai/context/config.json') -Raw -Encoding UTF8|ConvertFrom-Json
+    if([string]$record.project -cne [string]$config.project -or [string]$record.contextRemote -cne [string]$config.context.remote -or
+       [string]$record.contextRemote -cne (Invoke-ContinuityReviewGit $ContextRoot @('remote','get-url','origin')).Text){throw 'CONTEXT_UNSYNCED: reviewed legacy canonical project or remote differs.'}
+    Assert-ContinuityReviewKeys $record.review @('decision','authority','provenance')
+    if([string]$record.review.decision -cne 'preserve-unbound-and-enroll-independent-roots' -or
+       [string]::IsNullOrWhiteSpace([string]$record.review.authority) -or $record.review.provenance -is [string] -or @($record.review.provenance).Count -eq 0){throw 'CONTEXT_UNSYNCED: explicit reviewed enrollment decision is required.'}
+    foreach($item in @($record.review.provenance)){if($item -isnot [string] -or [string]::IsNullOrWhiteSpace($item)){throw 'CONTEXT_UNSYNCED: review provenance is incomplete.'}}
+    # An enrollment record is immutable after its first canonical addition.
+    $added=@((Invoke-ContinuityReviewGit $ContextRoot @('log','--reverse','--format=%H','--diff-filter=A','HEAD','--',$relative)).Text -split "`r?`n"|Where-Object {$_})
+    if($added.Count -ne 1 -or $added[0] -notmatch '^[0-9a-f]{40,64}$' -or
+       (Invoke-ContinuityReviewGit $ContextRoot @('rev-parse',($added[0]+':'+$relative))).Text -cne $blob.Text){throw 'CONTEXT_UNSYNCED: reviewed legacy record was replaced; preserve it for explicit reconciliation.'}
+    $reviewCommit=$added[0]
+    if([string]$record.baseCommit -notmatch '^[0-9a-f]{40,64}$' -or [string]$record.baseCommit -ceq $reviewCommit){throw 'CONTEXT_UNSYNCED: reviewed legacy base commit is invalid.'}
+    $null=Invoke-ContinuityReviewGit $ContextRoot @('merge-base','--is-ancestor',[string]$record.baseCommit,$reviewCommit)
+    $null=Invoke-ContinuityReviewGit $ContextRoot @('merge-base','--is-ancestor',$reviewCommit,'HEAD')
+    $expectedPaths=@(('manifests/repositories/'+$Repository+'.json'),('state/repositories/'+$Repository+'.md'),('handoffs/repositories/'+$Repository+'.md'))
+    if($record.legacy -is [string] -or @($record.legacy).Count -ne 3){throw 'CONTEXT_UNSYNCED: all three original legacy records must be preserved.'}
+    $protected=New-Object 'Collections.Generic.List[object]';$seen=@{}
+    foreach($entry in @($record.legacy)) {
+        Assert-ContinuityReviewKeys $entry @('path','blob')
+        $path=[string]$entry.path
+        if($expectedPaths -cnotcontains $path -or $seen.ContainsKey($path) -or [string]$entry.blob -notmatch '^[0-9a-f]{40,64}$'){throw 'CONTEXT_UNSYNCED: reviewed legacy protected paths are invalid.'}
+        $seen[$path]=$true;Assert-ContinuityReviewPath $ContextRoot $path
+        foreach($revision in @([string]$record.baseCommit,'HEAD')) {
+            if((Invoke-ContinuityReviewGit $ContextRoot @('rev-parse',($revision+':'+$path))).Text -cne [string]$entry.blob){throw 'CONTEXT_UNSYNCED: protected legacy record changed from its reviewed Git blob.'}
+        }
+        if(-not(Test-ContinuityReviewWorkingBlob $ContextRoot $path ([string]$entry.blob))){throw 'CONTEXT_UNSYNCED: protected legacy working bytes changed.'}
+        $protected.Add([pscustomobject]@{path=$path;blob=[string]$entry.blob})
+    }
+    $legacy=(Invoke-ContinuityReviewGit $ContextRoot @('show',('HEAD:'+ $expectedPaths[0]))).Text|ConvertFrom-Json
+    if([string]$legacy.repository -cne $Repository -or ($legacy.PSObject.Properties.Name -contains 'memberWorktree') -or
+       ($legacy.PSObject.Properties.Name -contains 'worktreeId') -or ($legacy.PSObject.Properties.Name -contains 'receiptPaths') -or
+       -not($legacy.PSObject.Properties.Name -contains 'continuity') -or [string]$legacy.continuity.mode -cne 'tracked'){throw 'CONTEXT_UNSYNCED: reconciliation may preserve only genuinely unbound tracked legacy records.'}
+    Assert-ContinuityReviewKeys $record.workstream @('id','sourceCommit','path','blob','disposition')
+    $wsId=[string]$record.workstream.id;$wsPath=[string]$record.workstream.path
+    if($wsId -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$' -or $wsId -cne [string]$legacy.continuity.workstreamId -or
+       $wsPath -cnotin @(('workstreams/active/'+$wsId+'.json'),('workstreams/archive/'+$wsId+'.json')) -or
+       [string]$record.workstream.sourceCommit -notmatch '^[0-9a-f]{40,64}$' -or [string]$record.workstream.blob -notmatch '^[0-9a-f]{40,64}$'){throw 'CONTEXT_UNSYNCED: reviewed legacy workstream provenance is invalid.'}
+    Assert-ContinuityReviewPath $ContextRoot $wsPath
+    $null=Invoke-ContinuityReviewGit $ContextRoot @('merge-base','--is-ancestor',[string]$record.workstream.sourceCommit,$reviewCommit)
+    foreach($revision in @([string]$record.workstream.sourceCommit,'HEAD')) {
+        if((Invoke-ContinuityReviewGit $ContextRoot @('rev-parse',($revision+':'+$wsPath))).Text -cne [string]$record.workstream.blob){throw 'CONTEXT_UNSYNCED: reviewed legacy workstream Git blob changed.'}
+    }
+    if(-not(Test-ContinuityReviewWorkingBlob $ContextRoot $wsPath ([string]$record.workstream.blob))){throw 'CONTEXT_UNSYNCED: reviewed legacy workstream bytes changed.'}
+    $ws=(Invoke-ContinuityReviewGit $ContextRoot @('show',('HEAD:'+$wsPath))).Text|ConvertFrom-Json
+    if([string]$ws.id -cne $wsId -or -not($ws.PSObject.Properties.Name -contains 'lastCheckpoint') -or
+       ($ws.lastCheckpoint.PSObject.Properties.Name -contains 'memberWorktree') -or ($ws.lastCheckpoint.PSObject.Properties.Name -contains 'worktreeId')){throw 'CONTEXT_UNSYNCED: a bound workstream cannot use unknown-owner enrollment.'}
+    $terminal=@('COMPLETED','CANCELLED','SUPERSEDED') -ccontains [string]$ws.status
+    if($terminal) {
+        if([string]$record.workstream.disposition -cne 'historical-contributor-superseded' -or $wsPath -cne ('workstreams/archive/'+$wsId+'.json') -or
+           $null -ne $ws.cursor.currentItemId -or @($ws.items|Where-Object {@('COMPLETED','CANCELLED','SUPERSEDED') -cnotcontains [string]$_.status}).Count -ne 0){throw 'CONTEXT_UNSYNCED: historical supersession requires exact terminal archive evidence.'}
+    } elseif([string]$record.workstream.disposition -cne 'preserved-unbound-proposed' -or [string]$ws.status -cne 'PROPOSED' -or
+             $wsPath -cne ('workstreams/active/'+$wsId+'.json') -or [string]$ws.lastCheckpoint.repository -cne $Repository -or
+             [string]$ws.lastCheckpoint.session -cne [string]$legacy.session -or @($ws.items|Where-Object {[string]$_.status -cne 'PENDING'}).Count -ne 0) {
+        throw 'CONTEXT_UNSYNCED: unresolved legacy work is not eligible for independent proposed-intent preservation.'
+    }
+    if($record.enrollments -is [string] -or @($record.enrollments).Count -eq 0){throw 'CONTEXT_UNSYNCED: explicit current roots must be reviewed.'}
+    $currentId=Get-ContinuityReviewWorktreeId $MemberRoot;$enrollment=$null;$ids=@{};$targetIds=@{}
+    foreach($entry in @($record.enrollments)) {
+        Assert-ContinuityReviewKeys $entry @('memberWorktree','worktreeId','scope','workstreamId')
+        if(-not[IO.Path]::IsPathRooted([string]$entry.memberWorktree) -or [string]$entry.worktreeId -cne (Get-ContinuityReviewWorktreeId ([string]$entry.memberWorktree)) -or
+           $ids.ContainsKey([string]$entry.worktreeId) -or [string]$entry.scope -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$' -or
+           [string]$entry.workstreamId -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$' -or [string]$entry.workstreamId -ceq $wsId -or $targetIds.ContainsKey([string]$entry.workstreamId)){throw 'CONTEXT_UNSYNCED: reviewed independent-root scope is invalid or duplicated.'}
+        $ids[[string]$entry.worktreeId]=$true;$targetIds[[string]$entry.workstreamId]=$true
+        if([string]$entry.worktreeId -ceq $currentId){$enrollment=$entry}
+    }
+    $proof=[pscustomobject]@{reviewPath=$relative;reviewBlob=$blob.Text;reviewCommit=$reviewCommit;baseCommit=[string]$record.baseCommit;files=@($protected|Sort-Object path);workstreamPath=$wsPath;workstreamBlob=[string]$record.workstream.blob}
+    return [pscustomobject]@{Proof=$proof;Enrollment=$enrollment;Evidence=[pscustomobject]@{disposition=[string]$record.workstream.disposition;historicalOwnerRoot='UNKNOWN';receipt=$false;reviewPath=$relative;reviewBlob=$blob.Text;protectedFiles=$proof.files;workstream=$ws}}
+}
+# End shared reviewed legacy validator.
+
 function Get-ContinuityPrevious {
     param([string]$ContextRoot, [string]$Repository, [string]$MemberRoot)
     $paths = Get-ContinuityRecordPaths -Repository $Repository -MemberRoot $MemberRoot
+    $review = Get-ContinuityLegacyReview $ContextRoot $Repository $MemberRoot
     $transfer = Get-ContinuityOfflineOwnershipTransfer -ContextRoot $ContextRoot -Repository $Repository -MemberRoot $MemberRoot
     $receiptMemberRoot = $MemberRoot
     foreach ($relative in @($paths.Manifest,$paths.LegacyManifest,$paths.State,$paths.Handoff,'workstreams/active')) {
@@ -382,7 +505,11 @@ function Get-ContinuityPrevious {
                 }
             } elseif ($legacy.PSObject.Properties.Name -contains 'continuity' -and $null -ne $legacy.continuity -and
                 [string]$legacy.continuity.mode -eq 'tracked' -and $script:ContinuityTerminalWorkstreamStatuses -notcontains [string]$legacy.continuity.workstreamStatus) {
-                throw 'Legacy active Context has no owning Worktree binding; preserve it and perform an explicitly reviewed mapping before continuation.'
+                if($null -eq $review -or $null -eq $review.Enrollment -or $null -ne $transfer) {
+                    throw 'Legacy active Context has no owning Worktree binding; preserve it and perform an explicitly reviewed mapping before continuation.'
+                }
+                $source = 'reviewed-independent-root'
+
             }
         }
     }
@@ -393,7 +520,7 @@ function Get-ContinuityPrevious {
             [string]$manifest.receiptPaths.manifest -cne $paths.Manifest -or [string]$manifest.receiptPaths.state -cne $paths.State -or [string]$manifest.receiptPaths.handoff -cne $paths.Handoff)) { throw 'Worktree Context Manifest receipt paths do not match the canonical owning scope.' }
     }
     if ($null -eq $manifest -or -not ($manifest.PSObject.Properties.Name -contains 'continuity') -or $null -eq $manifest.continuity) {
-        return [pscustomobject]@{ Manifest = $manifest; Workstream = $null; ReceiptSource = $source }
+        return [pscustomobject]@{ Manifest = $manifest; Workstream = $null; ReceiptSource = $source; LegacyReview = $review }
     }
     $relative = [string]$manifest.continuity.workstreamPath
     $workstream = $null
@@ -422,7 +549,7 @@ function Get-ContinuityPrevious {
     } elseif (-not [string]::IsNullOrWhiteSpace([string]$manifest.continuity.workstreamId)) {
         throw 'Previous workstream manifest declares an id without a canonical path.'
     }
-    return [pscustomobject]@{ Manifest = $manifest; Workstream = $workstream; ReceiptSource = $source }
+    return [pscustomobject]@{ Manifest = $manifest; Workstream = $workstream; ReceiptSource = $source; LegacyReview = $review }
 }
 
 function Test-ContinuityWorkstreamUnresolved {
@@ -609,6 +736,14 @@ function Assert-ContinuityTransition {
         if ($duplicates.Count -gt 0) { throw ('Validation ledger entry ids are immutable and already exist: ' + ($duplicates -join ', ')) }
     }
     $previous = Get-ContinuityPrevious -ContextRoot $ContextRoot -Repository $Repository -MemberRoot $MemberRoot
+    if($previous.ReceiptSource -eq 'reviewed-independent-root') {
+        $enrollment=$previous.LegacyReview.Enrollment
+        if([int]$Checkpoint.schemaVersion -ne 2 -or [string]$Checkpoint.scope -cne [string]$enrollment.scope -or
+           [string]$Checkpoint.continuity.mode -cne 'tracked' -or $null -eq $Checkpoint.continuity.workstream -or
+           [string]$Checkpoint.continuity.workstream.id -cne [string]$enrollment.workstreamId) {
+            throw 'Reviewed independent root must publish its explicitly admitted new scope and Workstream; legacy ownership was not transferred.'
+        }
+    }
     if ([int]$Checkpoint.schemaVersion -eq 2 -and $null -ne $Checkpoint.continuity.workstream) {
         $target = Get-ContinuityGlobalWorkstream -ContextRoot $ContextRoot -Id ([string]$Checkpoint.continuity.workstream.id) -Repository $Repository -MemberRoot $MemberRoot
         if ($null -ne $target) {
@@ -749,6 +884,7 @@ function Get-ContinuityRuntime {
         worktreeId = $ownerPaths.WorktreeId
         receiptPaths = if ($previous.ReceiptSource -eq 'offline-transfer') { $previous.Manifest.receiptPaths } else { [pscustomobject]@{manifest=$ownerPaths.Manifest;state=$ownerPaths.State;handoff=$ownerPaths.Handoff} }
         receiptSource = $previous.ReceiptSource
+        legacyEvidence = if($null -ne $previous.LegacyReview){$previous.LegacyReview.Evidence}else{$null}
         validation = [pscustomobject]@{ path = (Get-ContinuityValidationLedgerPath -Repository $Repository); entries = @($ledger.entries).Count; freshEntries = $fresh; staleEntries = $stale; mostRecent = $mostRecent }
     }
 }

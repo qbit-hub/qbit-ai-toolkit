@@ -75,7 +75,9 @@ jobs:
 
       - name: Run POSIX unit tests
         shell: bash
-        run: python installers/ai-context/tests/unit/test-unit.py
+        run: |
+          python installers/ai-context/tests/unit/test-unit.py
+          python installers/ai-context/tests/unit/test-reviewed-legacy-posix.py
 
       - name: Run POSIX installer integration tests
         shell: bash

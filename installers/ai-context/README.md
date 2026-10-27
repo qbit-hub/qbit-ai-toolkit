@@ -137,6 +137,12 @@ Online checkpoint publication uses ancestry checks rather than automatic history
 
 When connectivity returns, `reconnect` is the only supported automatic exit from imported offline mode. If the remote context branch is an ancestor of the local offline history, reconnect performs a normal non-force push. If the local history is an ancestor of the remote, it fast-forwards locally. If both sides advanced independently, reconnect fails closed and preserves both histories plus the offline marker; it never auto-merges, rebases, resets, or force-pushes divergent continuity.
 
+## Reviewed legacy enrollment boundary
+
+The native Windows lifecycle supports explicitly reviewed independent-root enrollment for preserved unbound legacy evidence. The canonical project-owned record is `references/continuity-reconciliations/<repository>.json`; its exact field contract and invariants are documented in [reviewed legacy enrollment](docs/reviewed-legacy-enrollment.md). It binds the original manifest/state/handoff Git blobs, global Workstream provenance, and named current roots with distinct new initial scopes. It does not manufacture a historical owner, published receipt, validation result, or permission to reopen a terminal Workstream. Runtime keeps old intent visible separately, every checkpoint preserves its bytes, and journal/replay/native Verify bind the immutable review.
+
+On POSIX, recognized reconciliation records cause a write-free unsupported-platform failure; use the native Windows lifecycle for enrolled roots. An ordinary POSIX repository without this record retains its existing behavior. The source-owned `scripts/Invoke-ContextSyncGate.ps1` forwards to the canonical managed gate template; do not self-install this asset into Toolkit. Version remains `1.2.9`; exact Git/source SHA evidence identifies this correction independently from prior 1.2.9 bytes.
+
 ## Security and authority
 
 Context remotes must not embed credentials. Windows runtime Git uses the normal credential chain first and may retry failed private `github.com` operations through `gh auth git-credential` when GitHub CLI is available. POSIX runtime Git delegates authentication to normal Git credential helpers and does not persist credentials in state or configuration.
