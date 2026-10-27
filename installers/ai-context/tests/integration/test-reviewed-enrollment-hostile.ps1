@@ -1,6 +1,7 @@
 #requires -Version 5.1
-param([Parameter(Mandatory=$true)][string]$FixtureRoot,[string]$ToolkitRoot=(Resolve-Path (Join-Path $PSScriptRoot '../../../..')).Path)
+param([Parameter(Mandatory=$true)][string]$FixtureRoot,[string]$ToolkitRoot='')
 $ErrorActionPreference='Stop';Set-StrictMode -Version Latest
+if([string]::IsNullOrWhiteSpace($ToolkitRoot)){$ToolkitRoot=(Resolve-Path (Join-Path $PSScriptRoot '../../../..')).Path}
 . (Join-Path $ToolkitRoot 'installers/ai-context/templates/common/central/tooling/context-continuity.ps1')
 $out=Join-Path (Split-Path -Parent $FixtureRoot) ('hostile-'+[guid]::NewGuid().ToString('N'));New-Item -ItemType Directory -Force -Path $out|Out-Null
 function Git([string]$root,[string[]]$Arguments){$old=$ErrorActionPreference;$ErrorActionPreference='Continue';try{$text=@(& git.exe -C $root @Arguments 2>&1);$code=$LASTEXITCODE}finally{$ErrorActionPreference=$old};if($code){throw ('Fixture Git failed '+($Arguments -join ' '))};return ($text -join "`n").Trim()}
