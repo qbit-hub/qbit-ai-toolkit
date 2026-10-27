@@ -485,12 +485,13 @@ function Write-RuntimeBundle {
         worktreeId = $continuityRuntime.worktreeId
         receiptPaths = $continuityRuntime.receiptPaths
         receiptSource = $continuityRuntime.receiptSource
+        legacyEvidence = $continuityRuntime.legacyEvidence
         workstream = $continuityRuntime.workstream
         validation = $continuityRuntime.validation
     }
 
     $runtimeJsonPath = Join-Path $bridgeDir 'context-runtime.json'
-    $runtime | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $runtimeJsonPath -Encoding UTF8
+    $runtime | ConvertTo-Json -Depth 30 | Set-Content -LiteralPath $runtimeJsonPath -Encoding UTF8
 
     $sections = New-Object System.Collections.Generic.List[string]
     $sections.Add('# Runtime AI Context')
@@ -529,6 +530,16 @@ function Write-RuntimeBundle {
         }
     }
 
+    if($null -ne $continuityRuntime.legacyEvidence) {
+        $evidence=$continuityRuntime.legacyEvidence
+        $sections.Add('')
+        $sections.Add('## Preserved unbound legacy intent (not an owning receipt)')
+        $sections.Add('')
+        $sections.Add('Historical owning root: UNKNOWN. This record supplies no current validation or ownership transfer.')
+        $sections.Add(('Reviewed reference: `'+[string]$evidence.reviewPath+'` blob `'+[string]$evidence.reviewBlob+'`.'))
+        $sections.Add(('Disposition: '+[string]$evidence.disposition))
+        $sections.Add((Convert-ContinuityWorkstreamToMarkdown -Workstream $evidence.workstream))
+    }
     $repoId = [string]$Config.repository
     $ownerRecords = Get-ContinuityRecordPaths -Repository $repoId -MemberRoot $MemberRoot
     $repoScoped = @()
@@ -782,6 +793,11 @@ function Assert-CheckpointJournalFiles {
         if ([string]::IsNullOrWhiteSpace($Revision)) {
             $path = Join-Path $Root $relative
             $actual = if (Test-Path -LiteralPath $path -PathType Leaf) { (Invoke-Git -WorkingDirectory $Root -Arguments @('hash-object', '--', $relative)).Output } else { '' }
+            if($Journal.PSObject.Properties.Name -contains 'legacyPreservation') {
+                $preserved=@($Journal.legacyPreservation.files|Where-Object {[string]$_.path -ceq $relative})
+                if($preserved.Count -eq 1 -and [string]$preserved[0].blob -ceq [string]$entry.blob -and
+                   (Test-ContinuityReviewWorkingBlob $Root $relative ([string]$entry.blob))){$actual=[string]$entry.blob}
+            }
         } else {
             $blob = Invoke-Git -WorkingDirectory $Root -Arguments @('rev-parse', ($Revision + ':' + $relative)) -AllowFailure
             $actual = if ($blob.ExitCode -eq 0) { $blob.Output } else { '' }
@@ -806,6 +822,12 @@ function Complete-PendingCheckpoint {
     $repoSlug = Get-SafeSlug -Value $repo
     if ($repo -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$' -or [string]$Journal.id -notmatch '^[0-9a-f]{32}$' -or [string]$Journal.session -notmatch ('^sessions/[0-9]{4}/[0-9]{2}/[0-9]{4}-[0-9]{2}-[0-9]{2}-[0-9]{6}-' + [regex]::Escape($repoSlug + '-' + $scope + '-' + [string]$Journal.id) + '\.md$')) { throw 'CONTEXT_UNSYNCED: pending checkpoint session identity is invalid.' }
     $ownerPaths = Get-ContinuityRecordPaths -Repository $repo -MemberRoot $memberRootFullPath
+    $legacyReview=Get-ContinuityLegacyReview $contextRoot $repo $memberRootFullPath
+    $hasLegacyProof=$Journal.PSObject.Properties.Name -contains 'legacyPreservation'
+    if(($null -ne $legacyReview) -ne $hasLegacyProof -or
+       ($hasLegacyProof -and ($Journal.legacyPreservation|ConvertTo-Json -Depth 30 -Compress) -cne ($legacyReview.Proof|ConvertTo-Json -Depth 30 -Compress))) {
+        throw 'CONTEXT_UNSYNCED: pending journal legacy preservation differs from its immutable canonical review.'
+    }
     $requiredPaths = @([string]$Journal.session, $ownerPaths.State, $ownerPaths.Handoff, $ownerPaths.Manifest, $ownerPaths.LegacyState, $ownerPaths.LegacyHandoff, $ownerPaths.LegacyManifest)
     $allowedPaths = @($requiredPaths)
     if ([int]$checkpoint.schemaVersion -eq 2) {
@@ -856,6 +878,13 @@ function Complete-PendingCheckpoint {
     if ($Journal.phase -eq 'prepared') {
         Assert-CheckpointJournalFiles -Journal $Journal -Root $contextRoot
         $paths = @($Journal.files | ForEach-Object { [string]$_.path })
+        # Protected predecessors are journal proof, never commit inputs. Adding
+        # an unchanged historical CRLF blob can still normalize it through Git's
+        # clean filters. Keep those committed index/tree entries untouched.
+        if($null -ne $legacyReview){
+            $protectedNames=@($legacyReview.Proof.files|ForEach-Object {[string]$_.path})
+            $paths=@($paths|Where-Object {$protectedNames -cnotcontains $_})
+        }
         Invoke-Git -WorkingDirectory $contextRoot -Arguments (@('add','--') + $paths) | Out-Null
         Invoke-Git -WorkingDirectory $contextRoot -Arguments @('diff','--cached','--check') | Out-Null
         Invoke-Git -WorkingDirectory $contextRoot -Arguments (@('commit','-m',[string]$Journal.message,'--') + $paths) | Out-Null
@@ -866,6 +895,12 @@ function Complete-PendingCheckpoint {
     if ($Journal.phase -notin @('committed','completed')) { throw 'CONTEXT_UNSYNCED: interrupted checkpoint preparation preserved; inspect journal and cache before manual recovery.' }
     if ([string]$Journal.commit -notmatch '^[0-9a-f]{40,64}$' -or -not (Test-GitAncestor -ContextRoot $contextRoot -Ancestor ([string]$Journal.commit) -Descendant 'HEAD')) { throw 'CONTEXT_UNSYNCED: pending checkpoint commit is not in the current context history.' }
     Assert-CheckpointJournalFiles -Journal $Journal -Root $contextRoot -Revision ([string]$Journal.commit)
+    if($null -ne $legacyReview){
+        $proofPaths=@($legacyReview.Proof.files)+@([pscustomobject]@{path=$legacyReview.Proof.workstreamPath;blob=$legacyReview.Proof.workstreamBlob},[pscustomobject]@{path=$legacyReview.Proof.reviewPath;blob=$legacyReview.Proof.reviewBlob})
+        foreach($proofPath in $proofPaths){
+            if((Invoke-ContinuityReviewGit $contextRoot @('rev-parse',([string]$Journal.commit+':'+[string]$proofPath.path))).Text -cne [string]$proofPath.blob){throw 'CONTEXT_UNSYNCED: checkpoint publication changed protected legacy evidence.'}
+        }
+    }
     $manifestText = (Invoke-Git -WorkingDirectory $contextRoot -Arguments @('show', ([string]$Journal.commit + ':' + $ownerPaths.Manifest))).Output
     $publishedManifest = $manifestText | ConvertFrom-Json
     if ([string]$publishedManifest.checkpointId -cne [string]$Journal.id -or [string]$publishedManifest.checkpointPayloadSha256 -cne [string]$Journal.payloadSha256 -or [string]$publishedManifest.session -cne [string]$Journal.session -or [string]$publishedManifest.worktreeFingerprint -cne [string]$Journal.sourceFingerprint -or [string]$publishedManifest.memberWorktree -cne $memberRootFullPath -or [string]$publishedManifest.worktreeId -cne $ownerPaths.WorktreeId -or
@@ -892,6 +927,7 @@ function Complete-PendingCheckpoint {
             if (($oldEntries[$index] | ConvertTo-Json -Depth 30 -Compress) -cne ($newEntries[$index] | ConvertTo-Json -Depth 30 -Compress)) { throw 'CONTEXT_UNSYNCED: validation ledger entries changed after publication.' }
         }
     }
+    if($null -ne $legacyReview){$currentPaths+=@($ownerPaths.LegacyState,$ownerPaths.LegacyHandoff,$ownerPaths.LegacyManifest)}
     Assert-CheckpointJournalFiles -Journal $Journal -Root $contextRoot -Revision 'HEAD' -OnlyPaths $currentPaths
     $freshMember = Get-GitState -Root $memberRootFullPath
     if ($freshMember.fingerprint -cne [string]$Journal.sourceFingerprint -or $freshMember.head -cne [string]$Journal.sourceCommit -or $freshMember.branch -cne [string]$Journal.sourceBranch) { throw 'CONTEXT_UNSYNCED: source changed during checkpoint publication; published context is historical. Preserve journal and create an explicitly reviewed recovery checkpoint.' }
@@ -1000,6 +1036,7 @@ if ($Action -eq 'checkpoint') {
     if ($contextState.dirty) { throw 'Automated checkpoint refused because the central context cache has pre-existing uncommitted changes.' }
     Assert-ContinuityTransition -ContextRoot $contextRoot -Checkpoint $checkpoint -Repository ([string]$config.repository) -MemberRoot $memberRootFullPath
     $ownershipTransfer = Get-ContinuityOfflineOwnershipTransfer -ContextRoot $contextRoot -Repository ([string]$config.repository) -MemberRoot $memberRootFullPath
+    $legacyReview=Get-ContinuityLegacyReview $contextRoot ([string]$config.repository) $memberRootFullPath
     $now = Get-Date
     $generatedAt = $now.ToString('o')
     $year = $now.ToString('yyyy',[Globalization.CultureInfo]::InvariantCulture)
@@ -1019,6 +1056,7 @@ if ($Action -eq 'checkpoint') {
         session = $sessionRelative; baseCommit = [string]$contextState.head; commit = ''
         message = "chore(context): checkpoint $repoId $scopeSlug"; files = @()
     }
+    if($null -ne $legacyReview){$journal|Add-Member -NotePropertyName legacyPreservation -NotePropertyValue $legacyReview.Proof}
     Save-CheckpointJournal -Path $journalPath -Journal $journal
     $ownerPaths = Get-ContinuityRecordPaths -Repository $repoId -MemberRoot $memberRootFullPath
     $stateRelative = $ownerPaths.State
@@ -1142,8 +1180,10 @@ if ($Action -eq 'checkpoint') {
         $manifest['continuity'] = $continuityResult.Metadata
     }
     if ($null -ne $ownershipTransfer) { $manifest['ownershipTransfer'] = $ownershipTransfer }
+    if ($null -ne $legacyReview) { $manifest['legacyPreservation'] = $legacyReview.Proof }
     $manifest | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $contextRoot $manifestRelative) -Encoding UTF8
     foreach ($pair in @(@($stateRelative,$ownerPaths.LegacyState),@($handoffRelative,$ownerPaths.LegacyHandoff),@($manifestRelative,$ownerPaths.LegacyManifest))) {
+        if($null -ne $legacyReview){continue} # Original unbound bytes remain protected, including later sibling checkpoints.
         $destination = Join-Path $contextRoot $pair[1]
         New-Item -ItemType Directory -Force -Path (Split-Path -Parent $destination) | Out-Null
         [IO.File]::WriteAllBytes($destination, [IO.File]::ReadAllBytes((Join-Path $contextRoot $pair[0])))
@@ -1153,6 +1193,10 @@ if ($Action -eq 'checkpoint') {
     $journal.files = @($pathsToCommit | ForEach-Object {
         $relative = [string]$_
         $blob = if (Test-Path -LiteralPath (Join-Path $contextRoot $relative) -PathType Leaf) { (Invoke-Git -WorkingDirectory $contextRoot -Arguments @('hash-object','--',$relative)).Output } else { '' }
+        if($null -ne $legacyReview){
+            $preserved=@($legacyReview.Proof.files|Where-Object {[string]$_.path -ceq $relative})
+            if($preserved.Count -eq 1){$blob=[string]$preserved[0].blob}
+        }
         [pscustomobject]@{ path = $relative; blob = $blob }
     })
     $journal.phase = 'prepared'

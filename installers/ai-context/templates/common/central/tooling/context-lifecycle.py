@@ -709,6 +709,18 @@ def unresolved_workstream(workstream: dict[str, Any]) -> bool:
     )
 
 
+def reject_reviewed_legacy_on_posix(context_root: Path, repository: str) -> None:
+    # Python does not yet implement scoped independent-root enrollment. Never
+    # overwrite protected legacy summaries through its older repository writer.
+    if not SAFE_CONTEXT_ID.fullmatch(repository):
+        raise RuntimeError("CONTEXT_UNSYNCED: invalid reconciliation repository identity.")
+    relative = f"references/continuity-reconciliations/{repository}.json"
+    path = context_root / relative
+    committed = run_git(context_root, ["cat-file", "-e", f"HEAD:{relative}"], True)
+    if path.exists() or path.is_symlink() or committed.returncode == 0:
+        raise RuntimeError("CONTEXT_UNSYNCED: reviewed independent-root enrollment requires the native Windows lifecycle; POSIX legacy writes are disabled for this repository.")
+
+
 def previous_continuity(context_root: Path, repository: str) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
     manifest = read_json_optional(context_root / f"manifests/repositories/{repository}.json")
     if not manifest or not isinstance(manifest.get("continuity"), dict):
@@ -998,6 +1010,7 @@ def synchronize_checkpoint_push(context_root: Path, expected_branch: str) -> Non
 
 
 def do_checkpoint(member_root: Path, context_root: Path, config: dict[str, Any], expected_branch: str, offline: bool = False) -> None:
+    reject_reviewed_legacy_on_posix(context_root, str(config["repository"]))
     context_state = git_state(context_root)
     checkpoint_freshness = "OFFLINE_IMPORTED_CONTEXT" if offline else "CURRENT_OR_FETCHED"
     if context_state["dirty"]:
@@ -1111,6 +1124,7 @@ def main() -> int:
         raise RuntimeError("AI context cachePath must remain inside the member repository.")
     if not (context_root / ".git").exists():
         raise RuntimeError("Central context cache is not a Git repository. Run the member context launcher first.")
+    reject_reviewed_legacy_on_posix(context_root, str(config["repository"]))
     require_context_files(context_root)
     state = git_state(context_root)
     expected_branch = str(config["context"]["branch"])
