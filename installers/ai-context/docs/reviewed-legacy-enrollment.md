@@ -23,4 +23,3 @@ Runtime JSON exposes `continuity.legacyEvidence` separately from the owning scop
 The POSIX lifecycle currently rejects any repository with a committed or local reconciliation record before lifecycle writes. It does not implement Windows independent-root enrollment; this explicit unsupported-platform boundary prevents the older repository-summary writer from overwriting protected evidence. Ordinary repositories without a reconciliation record retain their existing POSIX behavior.
 
 Installer version remains `1.2.9` for this correction. Record the exact canonical Git commit and source hashes to distinguish corrected assets; a shared version string does not establish byte parity, a completed rollout, or publication. No release tag or checkpoint/member-config schema change is implied.
-
