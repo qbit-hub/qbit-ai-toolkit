@@ -331,7 +331,7 @@ function Invoke-ContinuityReviewGit([string]$Root,[string[]]$Arguments,[switch]$
     try { $output=@(& git.exe -c core.longpaths=true -C $Root @Arguments 2>&1); $code=$LASTEXITCODE }
     finally { $ErrorActionPreference=$old }
     if($code -ne 0 -and -not $AllowFailure){throw 'CONTEXT_UNSYNCED: reviewed legacy Git provenance could not be verified.'}
-    return [pscustomobject]@{Code=$code;Text=($output -join "`n").Trim()}
+    return [pscustomobject]@{Code=$code;Text=($output -join "`n").Trim().TrimStart([char]0xFEFF)}
 }
 function Test-ContinuityReviewWorkingBlob([string]$Root,[string]$Path,[string]$Blob) {
     if(-not(Test-Path -LiteralPath (Join-Path $Root $Path) -PathType Leaf)){return $false}
