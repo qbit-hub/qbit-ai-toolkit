@@ -1,4 +1,6 @@
-# Windows continuity verification contract (1.2.9 candidate)
+# Windows continuity verification contract (1.2.9)
+
+Version 1.2.9 installer source is integrated into `qbit-ai-toolkit/main` as of verified commit `55354cb3` on 2026-10-30. This records source integration, not a separate tag, package distribution, host Hook activation, or fleet rollout.
 
 This is a fail-closed milestone contract, not a promise of uninterrupted network access. Windows PowerShell 5.1 and PowerShell 7 are tested hosts. The strict gate and the new journal/fingerprint hardening are Windows implementations; native Linux/macOS equivalence has not been certified. Existing POSIX portability support is not evidence of strict parity.
 

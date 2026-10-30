@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.2.9 (prepared, not published)
+## 1.2.9 (stable source integrated into main)
 
 - Isolate Windows current receipts by repository and normalized Worktree root; retain repository summaries for compatibility, preserve sibling cursors and bind global Workstream ownership to the publishing Worktree. Refuse ambiguous legacy mapping, missing scoped receipts and unsafe sibling takeovers; preserve append-only validation and exact journal replay across sibling publications.
 - Add actual installed linked-Worktree isolation and published-provenance negative fixtures with byte-preservation checks; project hook and premerge consumers select independently derived scoped receipt paths. Native POSIX strict/isolation parity remains unverified.
@@ -12,8 +12,8 @@
 - Introduce fingerprint-v2: raw UTF-8/NUL discovery, complete index identity, BOM-free Unicode batch hashing, fail-closed hashing and deep Windows paths without changing user configuration. Old fingerprints remain historical and require a fresh checkpoint.
 - Preserve archived Workstreams after later snapshots/new Workstreams; validate prior canonical paths before writes. Keep unresolved items and immutable validation IDs, with exact checkpoint retries idempotent.
 - Validate release manifest/VERSION consistency; test upgrades, repeated verification, installed bytes, relocated dirty Worktrees, missing dependencies and unmanaged-content preservation.
-- Extend actual installed real-Git E2E with independent recovery, source-drift rejection, repaired publication and direct project-hook invocation. Native Linux/macOS strict parity, actual Codex Trust, canonical release and fleet rollout remain explicit separate boundaries.
-- See docs/continuity-guarantee.md for tested operation/recovery commands and enforcement limits. This is a local candidate; canonical Git operations require owner authorization.
+- Extend actual installed real-Git E2E with independent recovery, source-drift rejection, repaired publication and direct project-hook invocation. Native Linux/macOS strict parity, actual Codex Trust, separate tag/package distribution and fleet rollout remain explicit separate boundaries.
+- See docs/continuity-guarantee.md for tested operation/recovery commands and enforcement limits. Installer source is integrated into `qbit-ai-toolkit/main` as of verified commit `55354cb3` on 2026-10-30; future checkpoint publication and canonical Git operations require owner authorization.
 ## 1.2.8
 
 - Make PowerShell checkpoint session directory and filename timestamps explicitly Gregorian and culture-invariant so non-Gregorian host cultures do not create paths such as `sessions/1405/...`.

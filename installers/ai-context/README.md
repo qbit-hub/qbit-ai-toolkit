@@ -1,6 +1,6 @@
 # AI Context Lifecycle installer
 
-`installer.ai-context` installs the zero-touch AI context lifecycle as a versioned toolkit asset. The current stable release is `1.2.9` for this source revision (following version `1.2.8`); this source-level designation does not prove that a canonical branch has been merged, deployed, or independently accepted; Continuity v2 is supported on Windows, Linux, and macOS in two modes:
+`installer.ai-context` installs the zero-touch AI context lifecycle as a versioned toolkit asset. The current stable release is `1.2.9` (following version `1.2.8`), with installer source integrated into `qbit-ai-toolkit/main` as of verified commit `55354cb3` on 2026-10-30. Source integration does not establish a separate tag, package distribution, deployment, or independent operational acceptance. Continuity v2 is supported on Windows, Linux, and macOS in two modes:
 
 - `member`: installs repository launchers/config plus managed lifecycle blocks in `AGENTS.md`, `AI_CONTEXT.md`, `.gitignore`, and `.ai-bridge/.gitignore`.
 - `central`: installs the canonical lifecycle engines, member launcher templates, checkpoint schema, regression suites, and automation documentation. It seeds project continuity files only when absent; seeded continuity becomes project-owned immediately and is never overwritten or removed by installer update/uninstall.
@@ -92,7 +92,7 @@ Legacy migration is explicit and fail-closed. It accepts only the recognized pre
 
 State is written last to `.qbit/toolkit/installed/ai-context.json`. Mutations snapshot touched files and restore byte-exact content if a write fails. Managed paths reject path traversal and symlink/reparse-point escapes.
 
-## Strict Windows synchronization gate (prepared 1.2.9)
+## Strict Windows synchronization gate (1.2.9)
 
 After a reviewed member installation/update, the Windows gate is installed at `.ai/context/context-sync-gate.ps1` and referenced by the managed agent instructions:
 
@@ -116,7 +116,7 @@ Windows receipts belong to a repository and normalized owning Worktree root. The
 Explicit Windows offline export/import uses transfer manifest schema `2` to validate the original scoped receipt, bundle, source HEAD/branch/fingerprint and target identity. It carries the original cursor into the imported runtime, then records transfer provenance in the new checkpoint rather than rewriting the original scoped records. Ordinary clones cannot take over another Worktree's mutable Workstream. POSIX transfer manifests remain at schema `1`; strict Windows isolation and transfer parity are not claimed for POSIX. Managed-text integrity normalizes UTF-8 BOM and line endings according to the installer; payload digests and source fingerprints remain byte-sensitive.
 
 The [operating and recovery contract](docs/continuity-guarantee.md) documents installation, strict closeout, interrupted publication, independent recovery and preservation boundaries.
-**Important limits:** this is a fail-closed **command gate**, not an automatically invoked OS/Codex Desktop hook. An agent can still skip commands until the installed host's workflow enforces them. The strict gate is Windows-only in this candidate; POSIX uses the existing lifecycle but does not yet have equivalent strict remote-head evidence. Do not claim guaranteed cross-platform or all-member rollout until those separate acceptance gates pass.
+**Important limits:** this is a fail-closed **command gate**, not an automatically invoked OS/Codex Desktop hook. An agent can still skip commands until the installed host's workflow enforces them. The strict gate is Windows-only in version 1.2.9; POSIX uses the existing lifecycle but does not yet have equivalent strict remote-head evidence. Do not claim guaranteed cross-platform or all-member rollout until those separate acceptance gates pass.
 
 ## Runtime lifecycle
 
