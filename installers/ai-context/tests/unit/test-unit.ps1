@@ -32,6 +32,14 @@ Test 'central templates render without unresolved placeholders' {
   $V=Get-Variables 'demo' 'Demo' 'demo-ai-context' 'demo-ai-context' 'https://github.com/example/demo-ai-context.git' 'main';$S=New-Spec 'central' $V
   foreach($Text in @($S.Files.Values)+@($S.Blocks.Values|%{$_.Content})+@($S.Seeds.Values)){Assert (-not ([string]$Text -match '\{\{[A-Z0-9_]+\}\}')) 'unresolved central placeholder'}
 }
+Test 'POSIX strict module is owned identically by member and central installers' {
+  $V=Get-Variables 'demo' 'Demo' 'demo-api' 'demo-ai-context' 'https://github.com/example/demo-ai-context.git' 'main'
+  $Member=New-Spec 'member' $V
+  $Central=New-Spec 'central' $V
+  Assert ($Member.Files.ContainsKey('.ai/context/context_strict.py')) 'member missing strict POSIX module'
+  Assert ($Member.Files['.ai/context/context_strict.py'] -eq $Central.Files['tooling/context_strict.py']) 'central and member POSIX module drift'
+  Assert ($Member.Files['.ai/context/context_strict.py'] -eq $Central.Files['templates/member/context_strict.py']) 'central member template POSIX module drift'
+}
 Test 'central seeds and managed tooling are separated' {
   $V=Get-Variables 'demo' 'Demo' 'demo-ai-context' 'demo-ai-context' 'https://github.com/example/demo-ai-context.git' 'main';$S=New-Spec 'central' $V
   Assert ($S.Files.ContainsKey('tooling/context-lifecycle.ps1')) 'central tooling not managed';Assert ($S.Seeds.ContainsKey('state/current.md')) 'current state not seeded';Assert (-not $S.Files.ContainsKey('state/current.md')) 'current state incorrectly installer-managed'

@@ -71,6 +71,7 @@ jobs:
             installers/ai-context/lib/installer.py \
             installers/ai-context/templates/common/member/context.py \
             installers/ai-context/templates/common/central/tooling/context-lifecycle.py \
+            installers/ai-context/templates/common/central/tooling/context_strict.py \
             installers/ai-context/tests/unit/test-unit.py
 
       - name: Run POSIX unit tests
@@ -78,6 +79,11 @@ jobs:
         run: |
           python installers/ai-context/tests/unit/test-unit.py
           python installers/ai-context/tests/unit/test-reviewed-legacy-posix.py
+          python installers/ai-context/tests/unit/test-strict-posix.py
+
+      - name: Run installed POSIX strict v2 integration and recovery
+        shell: bash
+        run: python installers/ai-context/tests/integration/test-strict-posix.py
 
       - name: Run POSIX installer integration tests
         shell: bash

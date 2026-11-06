@@ -98,6 +98,7 @@ class AiContextPosixUnitTests(unittest.TestCase):
         self.assertIn(".ai/context/context.ps1", spec.files)
         self.assertIn(".ai/context/context.sh", spec.files)
         self.assertIn(".ai/context/context.py", spec.files)
+        self.assertIn(".ai/context/context_strict.py", spec.files)
         self.assertIn("AGENTS.md", spec.blocks)
 
     def test_central_spec_contains_both_platform_lifecycle_tooling(self) -> None:
@@ -105,6 +106,7 @@ class AiContextPosixUnitTests(unittest.TestCase):
         spec = installer.new_spec("central", values)
         self.assertIn("tooling/context-lifecycle.ps1", spec.files)
         self.assertIn("tooling/context-lifecycle.py", spec.files)
+        self.assertEqual(spec.files["tooling/context_strict.py"], spec.files["templates/member/context_strict.py"])
         self.assertIn("tests/context-lifecycle.tests.ps1", spec.files)
         self.assertIn("tests/context-lifecycle.tests.sh", spec.files)
 

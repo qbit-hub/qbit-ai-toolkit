@@ -932,7 +932,7 @@ function Complete-PendingCheckpoint {
     $freshMember = Get-GitState -Root $memberRootFullPath
     if ($freshMember.fingerprint -cne [string]$Journal.sourceFingerprint -or $freshMember.head -cne [string]$Journal.sourceCommit -or $freshMember.branch -cne [string]$Journal.sourceBranch) { throw 'CONTEXT_UNSYNCED: source changed during checkpoint publication; published context is historical. Preserve journal and create an explicitly reviewed recovery checkpoint.' }
     Write-RuntimeBundle -MemberRoot $memberRootFullPath -ContextRoot $contextRoot -Config $config -ContextFreshness $checkpointFreshness | Out-Null
-    if (-not (Test-Path -LiteralPath $CheckpointPath -PathType Leaf) -or (Get-FileHash -LiteralPath $CheckpointPath -Algorithm SHA256).Hash.ToLowerInvariant() -cne [string]$Journal.payloadSha256) {
+    if (-not (Test-Path -LiteralPath $CheckpointPath -PathType Leaf) -or (Get-ContinuityTransferFileHash -Path $CheckpointPath) -cne [string]$Journal.payloadSha256) {
         throw 'CONTEXT_UNSYNCED: checkpoint payload changed during publication; new decisions and prior journal were preserved.'
     }
     $Journal.phase = 'completed'

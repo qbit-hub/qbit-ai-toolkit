@@ -4,7 +4,7 @@ $ErrorActionPreference = 'Stop'
 $Script:InstallerRoot = ([System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))).TrimEnd('\','/')
 $Script:ToolkitRoot = ([System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..\..'))).TrimEnd('\','/')
 $Script:InstallerId = 'installer.ai-context'
-$Script:InstallerVersion = '1.2.9'
+$Script:InstallerVersion = '1.3.0'
 $Script:StatePath = '.qbit/toolkit/installed/ai-context.json'
 $Script:BlockBegin = '<!-- qbit-toolkit:ai-context:start -->'
 $Script:BlockEnd = '<!-- qbit-toolkit:ai-context:end -->'
@@ -266,6 +266,7 @@ function New-Spec([string]$Mode,[hashtable]$Variables) {
     $Files['.ai/context/context.ps1'] = Read-Template 'templates/common/member/context.ps1'
     $Files['.ai/context/context.sh'] = Read-Template 'templates/common/member/context.sh'
     $Files['.ai/context/context.py'] = Read-Template 'templates/common/member/context.py'
+    $Files['.ai/context/context_strict.py'] = Read-Template 'templates/common/central/tooling/context_strict.py'
     $Files['.ai/context/context-transfer.ps1'] = Read-Template 'templates/common/member/context-transfer.ps1'
     $Files['.ai/context/context-sync-gate.ps1'] = Read-Template 'templates/common/member/context-sync-gate.ps1'
     $Files['.ai/context/config.json'] = Render-Template 'templates/common/member/config.json.tpl' $Variables
@@ -282,6 +283,9 @@ function New-Spec([string]$Mode,[hashtable]$Variables) {
     $Files['tooling/context-lifecycle.ps1'] = Read-Template 'templates/common/central/tooling/context-lifecycle.ps1'
     $Files['tooling/context-continuity.ps1'] = Read-Template 'templates/common/central/tooling/context-continuity.ps1'
     $Files['tooling/context-lifecycle.py'] = Read-Template 'templates/common/central/tooling/context-lifecycle.py'
+    $Files['tooling/context_strict.py'] = Read-Template 'templates/common/central/tooling/context_strict.py'
+    $Files['templates/member/context_strict.py'] = Read-Template 'templates/common/central/tooling/context_strict.py'
+    $Files['tests/fixtures/member-1.2.9/context.py'] = Read-Template 'templates/common/central/tests/fixtures/member-1.2.9/context.py'
     $Files['templates/member/context.ps1'] = Read-Template 'templates/common/member/context.ps1'
     $Files['templates/member/context.sh'] = Read-Template 'templates/common/member/context.sh'
     $Files['templates/member/context.py'] = Read-Template 'templates/common/member/context.py'

@@ -1,0 +1,120 @@
+{
+  "provenance": {
+    "producer": "unmodified Windows context-lifecycle.ps1 / context-continuity.ps1",
+    "toolkitSource": "55354cb37ef0ee289a5db2dd868a274bce0501b5",
+    "lifecycleSha256": "303c7bf66c499575e1f7f78b963604c1bc5dae89fda5ec2f63e4ff2bffab35b5",
+    "continuitySha256": "36b65a374db534fee1c7fc3a63947fbffb5121a9a94df8d9120f92505bf6819a",
+    "normalization": "Only temporary root and derived worktree paths/ID replaced with C:/fixture/member. Other producer fields preserved. Raw fixture and run evidence retained in ignored .ai-bridge during implementation."
+  },
+  "manifest": {
+    "schemaVersion": 1,
+    "generatedAt": "2026-10-30T20:54:57.8831552+03:30",
+    "repository": "demo-member",
+    "branch": "main",
+    "commit": "e8aefbe935c2b7b09107a6e88f4d07321d1452f6",
+    "dirty": false,
+    "worktreeFingerprint": "6fbfff98eaab9dfca2c9ce4e53ef06f0612a9e3ebc1ebac40eeb33e3a8e171d0",
+    "upstream": null,
+    "ahead": null,
+    "behind": null,
+    "status": "IN_PROGRESS",
+    "scope": "strict-posix",
+    "session": "sessions/2026/10/2026-10-30-205457-demo-member-strict-posix-62475f5042484a9ba9e9d93b2d6f436e.md",
+    "project": "demo",
+    "checkpointId": "62475f5042484a9ba9e9d93b2d6f436e",
+    "checkpointPayloadSha256": "9ea5ba537c4f2fd131c28782dd3d18def7374ab5fb106182df5b905c3d794dcd",
+    "memberWorktree": "C:\\fixture\\member",
+    "worktreeId": "wt-68ae0fa50e9b1339d4be1a8b5f9ee0b3",
+    "receiptPaths": {
+      "manifest": "manifests/worktrees/demo-member/wt-68ae0fa50e9b1339d4be1a8b5f9ee0b3.json",
+      "state": "state/worktrees/demo-member/wt-68ae0fa50e9b1339d4be1a8b5f9ee0b3.md",
+      "handoff": "handoffs/worktrees/demo-member/wt-68ae0fa50e9b1339d4be1a8b5f9ee0b3.md"
+    },
+    "continuity": {
+      "schemaVersion": 2,
+      "mode": "tracked",
+      "workstreamId": "strict-feature",
+      "workstreamStatus": "IN_PROGRESS",
+      "workstreamPath": "workstreams/active/strict-feature.json",
+      "currentItemId": "TASK-1",
+      "validationLedgerPath": "validation/repositories/demo-member.json"
+    }
+  },
+  "workstream": {
+    "id": "strict-feature",
+    "title": "Strict fixture",
+    "status": "IN_PROGRESS",
+    "objective": "Preserve continuation",
+    "repositories": [
+      {
+        "repository": "demo-member",
+        "role": "owner"
+      }
+    ],
+    "cursor": {
+      "currentItemId": "TASK-1",
+      "lastCompletedItemId": null,
+      "phase": "implementation",
+      "lastCompletedAction": "Validated fixture",
+      "nextAction": "Continue at exact cursor."
+    },
+    "items": [
+      {
+        "id": "TASK-1",
+        "title": "Implement",
+        "status": "IN_PROGRESS",
+        "priority": "HIGH",
+        "scope": [
+          "fixture"
+        ],
+        "acceptanceCriteria": [
+          "strict verify passes"
+        ],
+        "dependsOn": [],
+        "blockedBy": [],
+        "validationRequirements": [
+          "real Git publication"
+        ],
+        "notes": []
+      }
+    ],
+    "schemaVersion": 2,
+    "updatedAt": "2026-10-30T20:54:57.8831552+03:30",
+    "lastCheckpoint": {
+      "repository": "demo-member",
+      "memberWorktree": "C:\\fixture\\member",
+      "worktreeId": "wt-68ae0fa50e9b1339d4be1a8b5f9ee0b3",
+      "branch": "main",
+      "head": "e8aefbe935c2b7b09107a6e88f4d07321d1452f6",
+      "dirty": false,
+      "fingerprint": "6fbfff98eaab9dfca2c9ce4e53ef06f0612a9e3ebc1ebac40eeb33e3a8e171d0",
+      "session": "sessions/2026/10/2026-10-30-205457-demo-member-strict-posix-62475f5042484a9ba9e9d93b2d6f436e.md"
+    }
+  },
+  "ledger": {
+    "schemaVersion": 2,
+    "repository": "demo-member",
+    "entries": [
+      {
+        "id": "validation-1",
+        "kind": "integration",
+        "result": "PASS",
+        "repository": "demo-member",
+        "scope": "strict-posix",
+        "summary": "Executed local fixture",
+        "timestamp": "2026-10-30T17:24:56.477059+00:00",
+        "command": "local fixture",
+        "evidenceRefs": [],
+        "recordedAt": "2026-10-30T20:54:57.8831552+03:30",
+        "validFor": {
+          "head": "e8aefbe935c2b7b09107a6e88f4d07321d1452f6",
+          "dirty": false,
+          "fingerprint": "6fbfff98eaab9dfca2c9ce4e53ef06f0612a9e3ebc1ebac40eeb33e3a8e171d0",
+          "memberWorktree": "C:\\fixture\\member",
+          "worktreeId": "wt-68ae0fa50e9b1339d4be1a8b5f9ee0b3"
+        }
+      }
+    ],
+    "updatedAt": "2026-10-30T20:54:57.8831552+03:30"
+  }
+}

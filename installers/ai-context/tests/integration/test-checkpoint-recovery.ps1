@@ -11,6 +11,11 @@ function WriteUtf8([string]$Path,[string]$Text) {
     New-Item -ItemType Directory -Force -Path (Split-Path -Parent $Path) | Out-Null
     [IO.File]::WriteAllText($Path,$Text,(New-Object Text.UTF8Encoding($false)))
 }
+function Sha256File([string]$Path) {
+    $sha=[Security.Cryptography.SHA256]::Create()
+    try { return ([BitConverter]::ToString($sha.ComputeHash([IO.File]::ReadAllBytes($Path)))).Replace('-','').ToLowerInvariant() }
+    finally { $sha.Dispose() }
+}
 function Git([string]$Root,[string[]]$GitArguments) {
     $old=$ErrorActionPreference; $ErrorActionPreference='Continue'
     try { $output=@(& git.exe -c core.longpaths=true -C $Root @GitArguments 2>&1); $code=$LASTEXITCODE }
@@ -34,6 +39,16 @@ function Run([string]$Script,[string[]]$Arguments) {
     $text=$output -join "`n"
     Add-Content -LiteralPath (Join-Path $runRoot 'commands.log') -Value ($Script+' '+($Arguments -join ' ')+"`nexit="+$code+"`n"+$text)
     return [pscustomobject]@{Code=$code;Text=$text}
+}
+function RunWithoutGetFileHash([string]$Script,[string[]]$Arguments) {
+    $wrapper=Join-Path $runRoot 'without-get-file-hash.ps1'
+    WriteUtf8 $wrapper @'
+param([string]$Script)
+function global:Get-FileHash { throw 'Get-FileHash must not be called by installed Context runtime.' }
+& $Script @args
+exit $LASTEXITCODE
+'@
+    return Run $wrapper (@($Script)+$Arguments)
 }
 function Assert([bool]$Ok,[string]$Message) { if(-not $Ok){throw $Message} }
 function Case([string]$Name,[scriptblock]$Body) {
@@ -103,11 +118,28 @@ try {
     Case 'same operation retry publishes one checkpoint' {
         Remove-Item -LiteralPath (Join-Path $bare 'hooks/pre-receive')
         $before=@(Sessions).Count
-        $retry=Run $launcher @('checkpoint')
+        $retry=RunWithoutGetFileHash $launcher @('checkpoint')
         Assert ($retry.Code -eq 0) $retry.Text
         $receipt=ReadJournal
         Assert ($receipt.phase -eq 'completed' -and $receipt.id -eq $pendingId -and $receipt.session -eq $pendingSession) 'Retry replaced logical checkpoint identity.'
         Assert (@(Sessions).Count -eq $before -and (RemoteHead) -eq $receipt.commit) 'Retry generated a duplicate session or did not publish.'
+    }
+    Case 'installed sync gate hashes checkpoint bytes without Get-FileHash' {
+        $gate=Join-Path $member '.ai/context/context-sync-gate.ps1'
+        Payload 'installed-sync-gate-sha256'
+        $original=[IO.File]::ReadAllText($checkpoint)
+        WriteUtf8 (Join-Path $bare 'hooks/pre-receive') "#!/bin/sh`nexit 1`n"
+        $interrupted=RunWithoutGetFileHash $gate @('-MemberPath',$member,'-Mode','Checkpoint','-TimeoutSeconds','60')
+        Assert ($interrupted.Code -eq 3 -and (ReadJournal).phase -eq 'committed' -and (Test-Path $checkpoint)) 'Expected a retained committed operation after the fixture push rejection.'
+        Remove-Item -LiteralPath (Join-Path $bare 'hooks/pre-receive')
+        WriteUtf8 $checkpoint ($original+' ')
+        $rejected=RunWithoutGetFileHash $gate @('-MemberPath',$member,'-Mode','Checkpoint','-TimeoutSeconds','60')
+        Assert ($rejected.Code -eq 3 -and (ReadJournal).phase -eq 'committed' -and (Test-Path $checkpoint)) 'Tampered checkpoint payload was accepted or replaced the pending operation.'
+        WriteUtf8 $checkpoint $original
+        $synced=RunWithoutGetFileHash $gate @('-MemberPath',$member,'-Mode','Checkpoint','-TimeoutSeconds','60')
+        Assert ($synced.Code -eq 0) $synced.Text
+        Assert ((ReadJournal).phase -eq 'completed' -and -not (Test-Path -LiteralPath $checkpoint)) 'Installed sync gate did not complete and consume the valid v2 checkpoint.'
+        $script:originalPayload=$original
     }
     Case 'completed identical payload is idempotent' {
         $before=RemoteHead
@@ -267,7 +299,7 @@ try {
         $saved=[IO.File]::ReadAllText($journalPath)
         $value=ReadJournal
         $value.phase='preparing'
-        $value.payloadSha256=(Get-FileHash $checkpoint -Algorithm SHA256).Hash.ToLowerInvariant()
+        $value.payloadSha256=Sha256File $checkpoint
         WriteUtf8 $journalPath ($value | ConvertTo-Json -Depth 20)
         $before=RemoteHead
         $failed=Run $launcher @('checkpoint')

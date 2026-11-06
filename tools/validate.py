@@ -45,6 +45,17 @@ ABSOLUTE_PATH_DOCUMENTATION_PREFIXES = (
     "website/i18n/fa/docusaurus-plugin-content-docs/current/ai-tools/codexpro/",
 )
 AI_INDEX_ENTRY = "100644 a748023e65eac08492156379097aadfdde8ea686 0\t.gitignore"
+# The Toolkit is not an installer target. Its self-bootstrap runtime stays at a
+# reviewed release while the canonical installer templates develop independently.
+# Upgrade this pin only after explicitly reviewing the root runtime upgrade;
+# never derive trusted hashes from the working tree or installed-state files.
+AI_CONTEXT_SELF_BOOTSTRAP_VERSION = "1.2.9"
+AI_CONTEXT_SELF_BOOTSTRAP_SHA256 = {
+    "context.ps1": "567a3b106ba8a5b4c0dc210fbee3fd916b1af032f6202db749c6de9b3f8907fd",
+    "context.py": "ad48c5105f738827c9a106183195076e4065b170bdeb19af75f99cc714d411e2",
+    "context.sh": "6138e0013de4d2c538240348891507a4927bcdbaf71b7da04116ca9a344b9e67",
+    "context-transfer.ps1": "36c4a1646ba5d2547af825bab7fea9076a20ad921b51cc648a3f743058c178f3",
+}
 AI_GLOBAL_KEYS = {
     "language_backend", "line_ending", "gui_log_window", "web_dashboard", "web_dashboard_open_on_launch",
     "web_dashboard_interface", "web_dashboard_listen_address", "jetbrains_plugin_server_address", "log_level",
@@ -419,8 +430,12 @@ def validate_ai_context_continuity_v2() -> None:
         ("root_sh", "member_sh"),
         ("root_transfer", "member_transfer"),
     ):
-        if required_paths[root_key].read_bytes() != required_paths[template_key].read_bytes():
-            error(f"Toolkit root AI Context runtime drifted from canonical template: {rel(required_paths[root_key])}")
+        root_path = required_paths[root_key]
+        root_bytes = root_path.read_bytes()
+        if hashlib.sha256(root_bytes).hexdigest() != AI_CONTEXT_SELF_BOOTSTRAP_SHA256[root_path.name]:
+            error(f"Toolkit root AI Context runtime drifted from canonical template for self-bootstrap {AI_CONTEXT_SELF_BOOTSTRAP_VERSION}: {rel(root_path)}")
+        if version == AI_CONTEXT_SELF_BOOTSTRAP_VERSION and root_bytes != required_paths[template_key].read_bytes():
+            error(f"AI Context template differs from pinned self-bootstrap {version}: {rel(required_paths[template_key])}")
 
     if f"current stable release is `{version}`" not in readme:
         error("AI Context README stable release does not match VERSION")
@@ -464,7 +479,9 @@ def validate_ai_context_continuity_v2() -> None:
     ps_actions = "[ValidateSet('start', 'status', 'checkpoint', 'audit', 'export', 'import', 'reconnect')]"
     if ps_actions not in member_ps:
         error("PowerShell member launcher Continuity v2 action surface is incomplete")
-    py_actions = '{"start", "status", "checkpoint", "audit", "export", "import", "reconnect"}'
+    py_actions = ('{"start", "status", "checkpoint", "audit", "export", "import", "reconnect"}'
+                  if version == AI_CONTEXT_SELF_BOOTSTRAP_VERSION else
+                  '{"start", "status", "verify", "checkpoint", "audit", "export", "import", "reconnect"}')
     if py_actions not in member_py:
         error("Python/POSIX member launcher Continuity v2 action surface is incomplete")
 

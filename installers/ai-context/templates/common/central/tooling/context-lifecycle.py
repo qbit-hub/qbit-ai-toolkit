@@ -11,6 +11,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+sys.dont_write_bytecode = True
+
 ALLOWED_STATUSES = {
     "PROPOSED", "IN_PROGRESS", "IMPLEMENTED", "VALIDATED", "APPROVED", "MERGED",
     "DEPLOYED", "SUPERSEDED", "STALE", "BLOCKED", "UNKNOWN",
@@ -278,9 +280,15 @@ def runtime_bundle(
     config: dict[str, Any],
     freshness: str,
     membership: dict[str, Any] | None = None,
+    strict: bool = False,
 ) -> dict[str, Any]:
-    member_state = git_state(member_root)
-    context_state = git_state(context_root)
+    if strict:
+        import context_strict
+        member_state = dict(upstream=None, ahead=None, behind=None, **context_strict.source_state(member_root))
+        context_state = context_strict.source_state(context_root)
+    else:
+        member_state = git_state(member_root)
+        context_state = git_state(context_root)
     membership = membership or membership_info(context_root, config)
     generated = dt.datetime.now().astimezone().isoformat()
     runtime = {
@@ -309,7 +317,7 @@ def runtime_bundle(
         "membership": membership,
     }
     repo_id = str(config["repository"])
-    repository_manifest = read_json_optional(context_root / f"manifests/repositories/{repo_id}.json")
+    repository_manifest = None if strict else read_json_optional(context_root / f"manifests/repositories/{repo_id}.json")
     continuity_meta = repository_manifest.get("continuity") if repository_manifest and isinstance(repository_manifest.get("continuity"), dict) else None
     workstream: dict[str, Any] | None = None
     if continuity_meta and continuity_meta.get("workstreamPath"):
@@ -341,11 +349,12 @@ def runtime_bundle(
         ("Open Questions", "state/open-questions.md"), ("Pending Decisions", "state/pending-decisions.md"),
         ("Repository Map", "repositories/repositories.yaml"),
     ]
-    inputs.extend([
+    if not strict:
+        inputs.extend([
         ("Latest Repository State", f"state/repositories/{repo_id}.md"),
         ("Latest Repository Handoff", f"handoffs/repositories/{repo_id}.md"),
         ("Repository Provenance", f"manifests/repositories/{repo_id}.json"),
-    ])
+        ])
     for title, relative in inputs:
         text = read_optional(context_root / relative)
         if text is not None:
@@ -1104,12 +1113,24 @@ def main() -> int:
     parser.add_argument("--repository-root", required=True)
     parser.add_argument("--offline", action="store_true")
     parser.add_argument("--config-path", required=True)
+    parser.add_argument("--strict", action="store_true")
     args = parser.parse_args()
     member_root = Path(args.repository_root).resolve()
     config_path = Path(args.config_path).resolve()
     if not config_path.is_file():
         raise RuntimeError(f"Context config not found: {config_path}")
     config = json.loads(config_path.read_text(encoding="utf-8-sig"))
+    if args.strict:
+        import context_strict
+        member_root = context_strict.actual_root(args.repository_root)
+        context_root, _, _ = context_strict.configuration(member_root, config)
+        context_strict.require(not args.offline, "strict online lifecycle cannot use offline evidence")
+        require_context_files(context_root)
+        if args.action == "checkpoint":
+            context_strict.checkpoint(sys.modules[__name__], member_root, context_root, config)
+        else:
+            context_strict.write_runtime(sys.modules[__name__], member_root, context_root, config)
+        return 0
     if int(config.get("schemaVersion", 0)) != 1:
         raise RuntimeError("Unsupported context config schemaVersion.")
     cache_value = Path(str(config["context"]["cachePath"]))
@@ -1160,5 +1181,9 @@ if __name__ == "__main__":
     try:
         raise SystemExit(main())
     except Exception as exc:
+        if "--strict" in sys.argv:
+            message = str(exc) if str(exc).startswith("CONTEXT_UNSYNCED:") else "CONTEXT_UNSYNCED: invalid central configuration or checkpoint contract; preserve evidence"
+            print(message, file=sys.stderr)
+            raise SystemExit(3)
         print(str(exc), file=sys.stderr)
         raise SystemExit(12)

@@ -1,6 +1,6 @@
 # AI Context Lifecycle installer
 
-`installer.ai-context` installs the zero-touch AI context lifecycle as a versioned toolkit asset. The current stable release is `1.2.9` for this source revision (following version `1.2.8`); this source-level designation does not prove that a canonical branch has been merged, deployed, or independently accepted; Continuity v2 is supported on Windows, Linux, and macOS in two modes:
+`installer.ai-context` installs the zero-touch AI context lifecycle as a versioned toolkit asset. The current stable release is `1.3.0` for this source revision (following version `1.2.9`); this source-level designation does not prove that a canonical branch has been merged, deployed, or independently accepted; Continuity v2 is supported on Windows, Linux, and macOS in two modes:
 
 - `member`: installs repository launchers/config plus managed lifecycle blocks in `AGENTS.md`, `AI_CONTEXT.md`, `.gitignore`, and `.ai-bridge/.gitignore`.
 - `central`: installs the canonical lifecycle engines, member launcher templates, checkpoint schema, regression suites, and automation documentation. It seeds project continuity files only when absent; seeded continuity becomes project-owned immediately and is never overwritten or removed by installer update/uninstall.
@@ -92,7 +92,7 @@ Legacy migration is explicit and fail-closed. It accepts only the recognized pre
 
 State is written last to `.qbit/toolkit/installed/ai-context.json`. Mutations snapshot touched files and restore byte-exact content if a write fails. Managed paths reject path traversal and symlink/reparse-point escapes.
 
-## Strict Windows synchronization gate (prepared 1.2.9)
+## Strict synchronization gates (prepared 1.3.0)
 
 After a reviewed member installation/update, the Windows gate is installed at `.ai/context/context-sync-gate.ps1` and referenced by the managed agent instructions:
 
@@ -113,10 +113,25 @@ Start requires fresh runtime/member identity, canonical cache origin, clean cach
 
 Windows receipts belong to a repository and normalized owning Worktree root. The scoped Manifest, state and handoff under `manifests/worktrees/`, `state/worktrees/` and `handoffs/worktrees/` remain authoritative after a sibling publishes; repository-level files are compatibility summaries. Missing own receipts cannot erase unresolved continuation. Workstream owner and Session must agree, and Verify preserves the immutable published validation-ledger prefix while allowing another Worktree to append entries.
 
-Explicit Windows offline export/import uses transfer manifest schema `2` to validate the original scoped receipt, bundle, source HEAD/branch/fingerprint and target identity. It carries the original cursor into the imported runtime, then records transfer provenance in the new checkpoint rather than rewriting the original scoped records. Ordinary clones cannot take over another Worktree's mutable Workstream. POSIX transfer manifests remain at schema `1`; strict Windows isolation and transfer parity are not claimed for POSIX. Managed-text integrity normalizes UTF-8 BOM and line endings according to the installer; payload digests and source fingerprints remain byte-sensitive.
+Explicit Windows offline export/import uses transfer manifest schema `2` to validate the original scoped receipt, bundle, source HEAD/branch/fingerprint and target identity. It carries the original cursor into the imported runtime, then records transfer provenance in the new checkpoint rather than rewriting the original scoped records. Ordinary clones cannot take over another Worktree's mutable Workstream. POSIX transfer manifests remain at schema `1`; Windows offline ownership-transfer parity is not claimed for POSIX. Managed-text integrity normalizes UTF-8 BOM and line endings according to the installer; payload digests and source fingerprints remain byte-sensitive.
 
 The [operating and recovery contract](docs/continuity-guarantee.md) documents installation, strict closeout, interrupted publication, independent recovery and preservation boundaries.
-**Important limits:** this is a fail-closed **command gate**, not an automatically invoked OS/Codex Desktop hook. An agent can still skip commands until the installed host's workflow enforces them. The strict gate is Windows-only in this candidate; POSIX uses the existing lifecycle but does not yet have equivalent strict remote-head evidence. Do not claim guaranteed cross-platform or all-member rollout until those separate acceptance gates pass.
+On POSIX hosts, install/update both the central repository and member to 1.3.0, then use:
+
+```bash
+bash .ai/context/context.sh start
+bash .ai/context/context.sh status     # read-only health, no milestone acceptance
+bash .ai/context/context.sh checkpoint # after writing a complete schema-v2 payload
+bash .ai/context/context.sh verify
+```
+
+The native Python gate checks live remote/branch SHA, current Git root, source/index fingerprint and runtime age (at most 120 minutes, never future dated). Checkpoint creates one owning Manifest/state/handoff/new Session publication, a byte-exact SHA-256-bound payload under `checkpoints/worktrees/`, and immutable validation rows. Verify independently checks that publication and accepts sibling ledger appends while rejecting changed owning evidence. POSIX root identities preserve case; Windows drive/UNC identities use Windows normalization. A health-only Status writes no runtime files. Online Checkpoint requires `behavior.pushContext: true`.
+
+POSIX checkpoint retries reconstruct the exact operation from its payload and base commit under an OS-released cache lock. Incomplete or mismatched journals, source races, unrelated dirty files, remote divergence, Session reuse and foreign Workstream ownership fail closed with exit **3 / CONTEXT_UNSYNCED**. Preserve the payload, `.ai-bridge/context-checkpoint-pending.json` and cache on failure. Exact prepared/committed/completed operations can retry without duplicate commits; divergent writers need explicit reconciliation.
+
+POSIX writes only its Worktree-scoped receipts. Historical repository summaries, unknown-owner Workstreams and existing validation rows are preserved. Unbound tracked legacy history requires the immutable, explicitly reviewed Windows independent-root-enrollment contract under `references/continuity-reconciliations/`; enrollment creates a distinct admitted Workstream and never transfers historical ownership. Bound legacy receipts may continue only at their exact owning root. Offline export/import/reconnect retain the legacy POSIX schema-1 flow; offline evidence cannot pass strict online Verify. Existing 1.2.9 consumers retain their legacy engine entrypoint; new members refuse a central repository without the strict module.
+
+**Important limits:** this is a fail-closed **command gate**, not an automatically invoked OS/Codex Desktop hook. An agent can still skip commands until the installed host's workflow enforces them. Native Ubuntu/macOS acceptance runs in the POSIX CI matrix; a Windows fixture run alone does not certify those hosts. No canonical publication or fleet rollout is implied by this source candidate.
 
 ## Runtime lifecycle
 
@@ -124,7 +139,7 @@ Member agents select the launcher for the active host:
 
 ```text
 Windows      .ai/context/context.ps1 start|status|checkpoint|audit|export|import|reconnect
-Linux/macOS  bash .ai/context/context.sh start|status|checkpoint|audit|export|import|reconnect
+Linux/macOS  bash .ai/context/context.sh start|status|verify|checkpoint|audit|export|import|reconnect
 ```
 
 The POSIX launcher uses only Python's standard library plus Git. Cache refresh is non-destructive: dirty context caches are never overwritten, diverged caches are not reset, and dirty caches refuse automatic origin migration/checkpointing. New substantive checkpoints use schema v2 tracked continuity with stable work-item IDs, execution cursor, dependencies, acceptance criteria, and structured validation ledger entries. The lifecycle rejects silent work-item loss, invalid status transitions, dependency cycles, duplicate validation IDs, and snapshot/downgrade attempts that would erase unresolved work. Validation evidence is bound to a deterministic member worktree fingerprint and is reported stale after relevant source changes. Secret-like material is rejected before central continuity files are written.
@@ -141,7 +156,7 @@ When connectivity returns, `reconnect` is the only supported automatic exit from
 
 The native Windows lifecycle supports explicitly reviewed independent-root enrollment for preserved unbound legacy evidence. The canonical project-owned record is `references/continuity-reconciliations/<repository>.json`; its exact field contract and invariants are documented in [reviewed legacy enrollment](docs/reviewed-legacy-enrollment.md). It binds the original manifest/state/handoff Git blobs, global Workstream provenance, and named current roots with distinct new initial scopes. It does not manufacture a historical owner, published receipt, validation result, or permission to reopen a terminal Workstream. Runtime keeps old intent visible separately, every checkpoint preserves its bytes, and journal/replay/native Verify bind the immutable review.
 
-On POSIX, recognized reconciliation records cause a write-free unsupported-platform failure; use the native Windows lifecycle for enrolled roots. An ordinary POSIX repository without this record retains its existing behavior. The source-owned `scripts/Invoke-ContextSyncGate.ps1` forwards to the canonical managed gate template; do not self-install this asset into Toolkit. Version remains `1.2.9`; exact Git/source SHA evidence identifies this correction independently from prior 1.2.9 bytes.
+The POSIX strict online path validates this same immutable reconciliation contract. Its legacy/offline writer continues to reject enrolled roots so it cannot overwrite protected history. The source-owned `scripts/Invoke-ContextSyncGate.ps1` forwards to the canonical managed Windows gate template; do not self-install this asset into Toolkit.
 
 ## Security and authority
 

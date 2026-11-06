@@ -190,6 +190,71 @@ class ValidateUnitTests(unittest.TestCase):
         validate.validate_ai_context_continuity_v2()
         self.assertEqual([], validate.errors)
 
+    def test_continuity_v2_contract_accepts_candidate_with_pinned_self_bootstrap(self) -> None:
+        self.copy_continuity_fixture()
+        installer = self.root / "installers/ai-context"
+        self.assertEqual("1.3.0", (installer / "VERSION").read_text().strip())
+        self.assertEqual("1.2.9", validate.AI_CONTEXT_SELF_BOOTSTRAP_VERSION)
+        self.assertNotEqual((self.root / ".ai/context/context.py").read_bytes(),
+                            (installer / "templates/common/member/context.py").read_bytes())
+        validate.validate_ai_context_continuity_v2()
+        self.assertEqual([], validate.errors)
+
+    def pin_continuity_fixture_to_self_bootstrap(self) -> None:
+        installer = self.root / "installers/ai-context"
+        candidate = (installer / "VERSION").read_text().strip()
+        pinned = validate.AI_CONTEXT_SELF_BOOTSTRAP_VERSION
+        for relative in ("installers/ai-context/VERSION", "installers/ai-context/README.md",
+                         "installers/ai-context/CHANGELOG.md", "docs/ai-tooling/continuity-v2.md"):
+            path = self.root / relative
+            write_text(path, path.read_text(encoding="utf-8").replace(candidate, pinned))
+        for name in validate.AI_CONTEXT_SELF_BOOTSTRAP_SHA256:
+            shutil.copy2(self.root / ".ai/context" / name, installer / "templates/common/member" / name)
+
+    def test_continuity_v2_contract_accepts_matching_self_bootstrap_release(self) -> None:
+        self.copy_continuity_fixture()
+        self.pin_continuity_fixture_to_self_bootstrap()
+        validate.validate_ai_context_continuity_v2()
+        self.assertEqual([], validate.errors)
+
+    def test_continuity_v2_contract_rejects_self_bootstrap_drift_at_both_versions(self) -> None:
+        self.copy_continuity_fixture()
+        for version in ("1.3.0", "1.2.9"):
+            if version == "1.2.9":
+                self.pin_continuity_fixture_to_self_bootstrap()
+            for name in validate.AI_CONTEXT_SELF_BOOTSTRAP_SHA256:
+                with self.subTest(version=version, name=name):
+                    path = self.root / ".ai/context" / name
+                    original = path.read_bytes()
+                    path.write_bytes(original + b"# unauthorized change\n")
+                    validate.errors = []
+                    validate.validate_ai_context_continuity_v2()
+                    self.assertTrue(any("runtime drifted" in item and name in item for item in validate.errors), validate.errors)
+                    path.write_bytes(original)
+
+    def test_continuity_v2_contract_rejects_matching_root_and_template_tamper(self) -> None:
+        self.copy_continuity_fixture()
+        for relative in (".ai/context/context.py", "installers/ai-context/templates/common/member/context.py"):
+            path = self.root / relative
+            write_text(path, path.read_text(encoding="utf-8") + "# matching unauthorized change\n")
+        validate.validate_ai_context_continuity_v2()
+        self.assertTrue(any("runtime drifted" in item and "context.py" in item for item in validate.errors), validate.errors)
+
+    def test_continuity_v2_contract_rejects_unreviewed_root_candidate_upgrade(self) -> None:
+        self.copy_continuity_fixture()
+        shutil.copy2(self.root / "installers/ai-context/templates/common/member/context.py",
+                     self.root / ".ai/context/context.py")
+        validate.validate_ai_context_continuity_v2()
+        self.assertTrue(any("runtime drifted" in item and "context.py" in item for item in validate.errors), validate.errors)
+
+    def test_continuity_v2_contract_rejects_same_version_template_drift(self) -> None:
+        self.copy_continuity_fixture()
+        self.pin_continuity_fixture_to_self_bootstrap()
+        path = self.root / "installers/ai-context/templates/common/member/context.py"
+        write_text(path, path.read_text(encoding="utf-8") + "# unauthorized template change\n")
+        validate.validate_ai_context_continuity_v2()
+        self.assertTrue(any("template differs from pinned self-bootstrap" in item for item in validate.errors), validate.errors)
+
     def test_continuity_v2_contract_rejects_toolkit_schema_v1_policy_drift(self) -> None:
         self.copy_continuity_fixture()
         path = self.root / "AGENTS.md"

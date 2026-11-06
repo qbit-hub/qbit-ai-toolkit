@@ -9,6 +9,11 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 function Fail([string]$Why) { throw "CONTEXT_UNSYNCED: $Why" }
+function Get-ContextSyncFileSha256([string]$Path) {
+  $sha=[Security.Cryptography.SHA256]::Create()
+  try { return ([BitConverter]::ToString($sha.ComputeHash([IO.File]::ReadAllBytes($Path)))).Replace('-','').ToLowerInvariant() }
+  finally { $sha.Dispose() }
+}
 function Quote-Argument([string]$Value) {
   return '"' + [regex]::Replace([regex]::Replace($Value, '(\\*)"', '$1$1\"'), '(\\+)$', '$1$1') + '"'
 }
@@ -328,7 +333,7 @@ function Assert-PublishedCheckpoint([string]$Cache,$Current,$Config) {
      -not $sessionText.ToLowerInvariant().Contains(('Checkpoint payload SHA256: '+[string]$manifest.checkpointPayloadSha256).ToLowerInvariant())){Fail 'Session checkpoint identity or payload digest mismatch'}
   $pendingPayload=Join-Path $Current.Root '.ai-bridge/context-checkpoint.json'
   if(Test-Path -LiteralPath $pendingPayload -PathType Leaf){
-    if((Get-FileHash -LiteralPath $pendingPayload -Algorithm SHA256).Hash -ne [string]$manifest.checkpointPayloadSha256){Fail 'unpublished durable decisions or checkpoint payload remain pending'}
+    if((Get-ContextSyncFileSha256 -Path $pendingPayload) -ne [string]$manifest.checkpointPayloadSha256){Fail 'unpublished durable decisions or checkpoint payload remain pending'}
   }
   if($manifest.continuity.mode -eq 'tracked'){
     $wsPath=[string]$manifest.continuity.workstreamPath
@@ -384,7 +389,7 @@ try {
   if($cp.schemaVersion -ne 2 -or $cp.repository -ne $cfg.repository -or -not $cp.continuity){
     Fail "schema v2 checkpoint and matching repository/continuity required"
   }
-  $expectedPayloadHash=(Get-FileHash -LiteralPath $payload -Algorithm SHA256).Hash
+  $expectedPayloadHash=Get-ContextSyncFileSha256 -Path $payload
   $journalFile=Join-Path $root '.ai-bridge/context-checkpoint-pending.json'
   $retryJournal=$null
   if(Test-Path -LiteralPath $journalFile -PathType Leaf){
