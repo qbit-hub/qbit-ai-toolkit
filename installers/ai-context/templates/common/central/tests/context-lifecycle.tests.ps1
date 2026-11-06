@@ -29,6 +29,14 @@ function Assert-True {
     if (-not $Condition) { throw "ASSERTION FAILED: $Message" }
 }
 
+function Get-TestFileHash {
+    param([Parameter(Mandatory = $true)][string]$LiteralPath, [ValidateSet('SHA256')][string]$Algorithm = 'SHA256')
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try {
+        return [pscustomobject]@{ Hash = ([BitConverter]::ToString($sha.ComputeHash([IO.File]::ReadAllBytes($LiteralPath)))).Replace('-', '').ToUpperInvariant() }
+    } finally { $sha.Dispose() }
+}
+
 function Assert-Fails {
     param([scriptblock]$Script, [string]$Contains)
     $message = $null
@@ -646,7 +654,7 @@ $tests += @{ Name = 'v2 completed workstream moves from active to archive'; Run 
         Assert-True -Condition ($manifest.continuity.workstreamPath -eq 'workstreams/archive/landing-polish.json') -Message 'Manifest must point to archived workstream.'
         Assert-True -Condition ($null -eq $manifest.continuity.currentItemId) -Message 'Completed workstream must clear current item.'
         $archivePath = Join-Path $env.Cache 'workstreams/archive/landing-polish.json'
-        $archiveHash = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash
+        $archiveHash = (Get-TestFileHash -LiteralPath $archivePath -Algorithm SHA256).Hash
         [ordered]@{
             schemaVersion = 2; repository = 'test-member'; scope = 'after-archive'; status = 'VALIDATED'
             objective = 'Record a later snapshot without deleting historical work.'; confirmedFindings = @(); decisions = @(); rejectedApproaches = @()
@@ -654,13 +662,13 @@ $tests += @{ Name = 'v2 completed workstream moves from active to archive'; Run 
             continuity = [ordered]@{ mode = 'snapshot'; workstream = $null; validationLedger = @() }
         } | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $env.Checkpoint -Encoding UTF8
         Invoke-Launcher -Env $env -Action 'checkpoint'
-        Assert-True -Condition ((Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash -eq $archiveHash) -Message 'A later snapshot must retain archived Workstream bytes.'
+        Assert-True -Condition ((Get-TestFileHash -LiteralPath $archivePath -Algorithm SHA256).Hash -eq $archiveHash) -Message 'A later snapshot must retain archived Workstream bytes.'
         Write-TrackedCheckpoint -Env $env -ValidationId 'VAL-4'
         $nextWorkstream = Get-Content -LiteralPath $env.Checkpoint -Raw | ConvertFrom-Json
         $nextWorkstream.continuity.workstream.id = 'next-workstream'
         $nextWorkstream | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $env.Checkpoint -Encoding UTF8
         Invoke-Launcher -Env $env -Action 'checkpoint'
-        Assert-True -Condition ((Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash -eq $archiveHash) -Message 'A new active Workstream must retain old archived Workstream bytes.'
+        Assert-True -Condition ((Get-TestFileHash -LiteralPath $archivePath -Algorithm SHA256).Hash -eq $archiveHash) -Message 'A new active Workstream must retain old archived Workstream bytes.'
         Assert-True -Condition (Test-Path -LiteralPath (Join-Path $env.Cache 'workstreams/active/next-workstream.json')) -Message 'New active Workstream should coexist with prior archive.'
     } finally { Remove-Item -LiteralPath $env.Base -Recurse -Force -ErrorAction SilentlyContinue }
 } }
@@ -679,9 +687,9 @@ $tests += @{ Name = 'v2 malformed previous Workstream paths reject without mutat
         $ledgerPath = Join-Path $env.Cache 'validation/repositories/test-member.json'
         $unrelatedPath = Join-Path $env.Cache 'unrelated.json'
         Copy-Item -LiteralPath $activePath -Destination $unrelatedPath
-        $beforeActive = (Get-FileHash -LiteralPath $activePath -Algorithm SHA256).Hash
-        $beforeLedger = (Get-FileHash -LiteralPath $ledgerPath -Algorithm SHA256).Hash
-        $beforeUnrelated = (Get-FileHash -LiteralPath $unrelatedPath -Algorithm SHA256).Hash
+        $beforeActive = (Get-TestFileHash -LiteralPath $activePath -Algorithm SHA256).Hash
+        $beforeLedger = (Get-TestFileHash -LiteralPath $ledgerPath -Algorithm SHA256).Hash
+        $beforeUnrelated = (Get-TestFileHash -LiteralPath $unrelatedPath -Algorithm SHA256).Hash
         Write-TrackedCheckpoint -Env $env -ValidationId 'VAL-2'
         $checkpoint = Get-Content -LiteralPath $env.Checkpoint -Raw | ConvertFrom-Json
         foreach ($invalid in @('unrelated.json', 'workstreams/active/wrong-id.json', 'workstreams/active/../archive/landing-polish.json', $unrelatedPath)) {
@@ -692,9 +700,9 @@ $tests += @{ Name = 'v2 malformed previous Workstream paths reject without mutat
                 Write-ContinuityState -ContextRoot $env.Cache -Checkpoint $checkpoint -MemberState ([pscustomobject]@{head='fixture';branch='main';dirty=$false;fingerprint='fixture'}) -GeneratedAt '2026-10-26T00:00:00Z' -SessionRelative 'sessions/2026/10/rejected.md' -MemberRoot $env.MemberClone
             } -Contains 'canonical bucket and id' | Out-Null
             Assert-True -Condition ((Invoke-Git -Root $env.Cache -Arguments @('status', '--porcelain', '--untracked-files=all')) -eq $beforeStatus) -Message 'Invalid prior path must not mutate any Context files.'
-            Assert-True -Condition ((Get-FileHash -LiteralPath $activePath -Algorithm SHA256).Hash -eq $beforeActive -and
-                (Get-FileHash -LiteralPath $ledgerPath -Algorithm SHA256).Hash -eq $beforeLedger -and
-                (Get-FileHash -LiteralPath $unrelatedPath -Algorithm SHA256).Hash -eq $beforeUnrelated) -Message 'Invalid prior path must preserve Workstream, ledger and unrelated bytes.'
+            Assert-True -Condition ((Get-TestFileHash -LiteralPath $activePath -Algorithm SHA256).Hash -eq $beforeActive -and
+                (Get-TestFileHash -LiteralPath $ledgerPath -Algorithm SHA256).Hash -eq $beforeLedger -and
+                (Get-TestFileHash -LiteralPath $unrelatedPath -Algorithm SHA256).Hash -eq $beforeUnrelated) -Message 'Invalid prior path must preserve Workstream, ledger and unrelated bytes.'
         }
     } finally { Remove-Item -LiteralPath $env.Base -Recurse -Force -ErrorAction SilentlyContinue }
 } }
@@ -739,7 +747,7 @@ $tests += @{ Name = 'offline export import resumes exact workstream without remo
         $importedManifest = Get-Content -LiteralPath $transferManifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
         $ownerPaths = $importedManifest.source.receipt
         $ownerHashes = @{}
-        foreach ($relative in @($ownerPaths.manifest,$ownerPaths.state,$ownerPaths.handoff)) { $ownerHashes[$relative] = (Get-FileHash -LiteralPath (Join-Path $consumer.Cache $relative)).Hash }
+        foreach ($relative in @($ownerPaths.manifest,$ownerPaths.state,$ownerPaths.handoff)) { $ownerHashes[$relative] = (Get-TestFileHash -LiteralPath (Join-Path $consumer.Cache $relative)).Hash }
         foreach ($field in @('targetWorktreeId','sourceSession','sourceWorktreeId','transferManifestSha256')) {
             $invalidMarker = Get-Content -LiteralPath $markerPath -Raw -Encoding UTF8 | ConvertFrom-Json
             $invalidMarker.ownershipTransfer.$field = 'forged-value'
@@ -795,7 +803,7 @@ $tests += @{ Name = 'offline export import resumes exact workstream without remo
         Assert-True -Condition ($newManifest.memberWorktree -eq $consumerRoot -and $newManifest.ownershipTransfer.sourceSession -eq $ownerPaths.session -and $newManifest.ownershipTransfer.transferId -eq $importedManifest.transferId) -Message 'New offline checkpoint must persist exact original-owner transfer provenance.'
         $newSession = [IO.File]::ReadAllText((Join-Path $consumer.Cache $newManifest.session))
         Assert-True -Condition ($newSession.Contains($importedManifest.transferId) -and $newSession.Contains($ownerPaths.session)) -Message 'New Session must durably record original transfer identity.'
-        foreach ($relative in $ownerHashes.Keys) { Assert-True -Condition ((Get-FileHash -LiteralPath (Join-Path $consumer.Cache $relative)).Hash -eq $ownerHashes[$relative]) -Message 'Offline migration must preserve original scoped receipt bytes.' }
+        foreach ($relative in $ownerHashes.Keys) { Assert-True -Condition ((Get-TestFileHash -LiteralPath (Join-Path $consumer.Cache $relative)).Hash -eq $ownerHashes[$relative]) -Message 'Offline migration must preserve original scoped receipt bytes.' }
         $afterOfflineCheckpoint = Invoke-Git -Root $consumer.Cache -Arguments @('rev-parse', 'HEAD')
         Assert-True -Condition ($afterOfflineCheckpoint -ne $beforeOfflineCheckpoint) -Message 'Offline checkpoint must commit continuity locally.'
         $marker = Get-Content -LiteralPath (Join-Path $consumerRoot '.ai-bridge/context-offline.json') -Raw | ConvertFrom-Json
@@ -863,12 +871,12 @@ $tests += @{ Name = 'offline import rejects changed target source without changi
         $retainedOrigin = Join-Path $env.Base 'retained-user-origin.git'
         Invoke-Git -Root $env.Cache -Arguments @('remote','set-url','origin',$retainedOrigin) | Out-Null
         $configPath = Join-Path $env.Cache '.git/config'
-        $beforeConfig = (Get-FileHash -LiteralPath $configPath).Hash
+        $beforeConfig = (Get-TestFileHash -LiteralPath $configPath).Hash
         $beforeHead = Invoke-Git -Root $env.Cache -Arguments @('rev-parse','HEAD')
-        $beforeSource = (Get-FileHash -LiteralPath (Join-Path $env.MemberClone 'new-local-source.txt')).Hash
+        $beforeSource = (Get-TestFileHash -LiteralPath (Join-Path $env.MemberClone 'new-local-source.txt')).Hash
         $result = Invoke-LauncherAllowFailure -Env $env -Action 'import'
         Assert-True -Condition ($result.ExitCode -ne 0 -and $result.Output -like '*target source HEAD/branch/fingerprint does not match*') -Message 'Changed target source must reject the ownership import.'
-        Assert-True -Condition ((Get-FileHash -LiteralPath $configPath).Hash -eq $beforeConfig -and (Invoke-Git -Root $env.Cache -Arguments @('rev-parse','HEAD')) -eq $beforeHead -and (Get-FileHash -LiteralPath (Join-Path $env.MemberClone 'new-local-source.txt')).Hash -eq $beforeSource) -Message 'Rejected import must preserve existing cache configuration, history and local source bytes.'
+        Assert-True -Condition ((Get-TestFileHash -LiteralPath $configPath).Hash -eq $beforeConfig -and (Invoke-Git -Root $env.Cache -Arguments @('rev-parse','HEAD')) -eq $beforeHead -and (Get-TestFileHash -LiteralPath (Join-Path $env.MemberClone 'new-local-source.txt')).Hash -eq $beforeSource) -Message 'Rejected import must preserve existing cache configuration, history and local source bytes.'
     } finally { Remove-Item -LiteralPath $env.Base -Recurse -Force -ErrorAction SilentlyContinue }
 } }
 

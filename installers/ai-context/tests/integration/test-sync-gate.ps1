@@ -3,6 +3,11 @@ $ErrorActionPreference='Stop'
 $gate=Join-Path $PSScriptRoot '../../scripts/Invoke-ContextSyncGate.ps1'
 $root=Join-Path ([IO.Path]::GetTempPath()) ('qbit-gate-'+[guid]::NewGuid().ToString('N'))
 $passed=0
+function Sha256File([string]$Path) {
+  $sha=[Security.Cryptography.SHA256]::Create()
+  try { return ([BitConverter]::ToString($sha.ComputeHash([IO.File]::ReadAllBytes($Path)))).Replace('-','').ToLowerInvariant() }
+  finally { $sha.Dispose() }
+}
 function Run-Gate([string]$mode,[int]$timeout=30) {
   $previous=$ErrorActionPreference
   $ErrorActionPreference='Continue'
@@ -48,6 +53,11 @@ try{
   $launcher=@'
 param([string]$Action='start')
 $ErrorActionPreference='Stop'
+function Sha256File([string]$Path) {
+  $sha=[Security.Cryptography.SHA256]::Create()
+  try { return ([BitConverter]::ToString($sha.ComputeHash([IO.File]::ReadAllBytes($Path)))).Replace('-','').ToLowerInvariant() }
+  finally { $sha.Dispose() }
+}
 $root=(Resolve-Path (Join-Path $PSScriptRoot '../..')).Path
 $cfg=Get-Content (Join-Path $root '.ai/context/config.json') -Raw|ConvertFrom-Json
 $cache=Join-Path $root $cfg.context.cachePath
@@ -98,7 +108,7 @@ if($Action -eq 'checkpoint'){
     }
     $scope=$cp.scope
     if(Test-Path (Join-Path $root '.ai-bridge/wrong-manifest.flag')){$scope='WRONG-SCOPE'}
-    $manifest=@{schemaVersion=1;generatedAt=[DateTime]::UtcNow.ToString('o');project='qbit';repository='qbit-test-gate';branch='main';dirty=$false;memberWorktree=$root;checkpointId=[Guid]::NewGuid().ToString('N');checkpointPayloadSha256=(Get-FileHash -LiteralPath (Join-Path $root '.ai-bridge/context-checkpoint.json') -Algorithm SHA256).Hash;worktreeFingerprint=$capturedFingerprint;commit=$head;scope=$scope;status=$cp.status;session=$session;continuity=$continuity}
+    $manifest=@{schemaVersion=1;generatedAt=[DateTime]::UtcNow.ToString('o');project='qbit';repository='qbit-test-gate';branch='main';dirty=$false;memberWorktree=$root;checkpointId=[Guid]::NewGuid().ToString('N');checkpointPayloadSha256=(Sha256File (Join-Path $root '.ai-bridge/context-checkpoint.json'));worktreeFingerprint=$capturedFingerprint;commit=$head;scope=$scope;status=$cp.status;session=$session;continuity=$continuity}
     [IO.File]::WriteAllText($manifestFile,($manifest|ConvertTo-Json -Depth 8))
     if(-not $reuse){[IO.File]::WriteAllText((Join-Path $cache $session),('Checkpoint ID: '+$manifest.checkpointId+"`nCheckpoint payload SHA256: "+$manifest.checkpointPayloadSha256))}
     &git -C $cache add state/repositories/qbit-test-gate.md manifests/repositories/qbit-test-gate.json $session $ledgerPath

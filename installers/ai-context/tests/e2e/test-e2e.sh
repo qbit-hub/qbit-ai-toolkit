@@ -54,7 +54,7 @@ test -f "$member/.ai-bridge/context-runtime.json"
 grep -q 'demo-member' "$member/.ai-bridge/context-runtime.md"
 cat >"$member/.ai-bridge/context-checkpoint.json" <<'EOF'
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "repository": "demo-member",
   "scope": "posix-installer-e2e",
   "status": "VALIDATED",
@@ -64,22 +64,36 @@ cat >"$member/.ai-bridge/context-checkpoint.json" <<'EOF'
   "rejectedApproaches": [],
   "validation": ["local bare Git remote"],
   "openQuestions": [],
-  "nextAction": "Keep POSIX parity covered by regression tests."
+  "nextAction": "Keep POSIX parity covered by regression tests.",
+  "continuity": {"mode": "snapshot", "workstream": null, "validationLedger": []}
 }
 EOF
 bash "$member/.ai/context/context.sh" checkpoint >/dev/null
+bash "$member/.ai/context/context.sh" verify >/dev/null
 test ! -e "$member/.ai-bridge/context-checkpoint.json"
 
 git clone --branch main --single-branch "$remote" "$verify_clone" >/dev/null 2>&1
-test -f "$verify_clone/state/repositories/demo-member.md"
-test -f "$verify_clone/handoffs/repositories/demo-member.md"
-test -f "$verify_clone/manifests/repositories/demo-member.json"
-find "$verify_clone/sessions" -type f -name '*demo-member-posix-installer-e2e.md' | grep -q .
-python3 - "$verify_clone/manifests/repositories/demo-member.json" <<'PY'
+python3 - "$verify_clone" "$member" <<'PY'
 import json, pathlib, sys
-value=json.loads(pathlib.Path(sys.argv[1]).read_text())
+root=pathlib.Path(sys.argv[1])
+import hashlib
+member=str(pathlib.Path(sys.argv[2]).resolve())
+normalized=member.replace('\\','/').rstrip('/')
+if len(normalized)>1 and normalized[1]==':': normalized=normalized.lower()
+wid='wt-'+hashlib.sha256(normalized.encode()).hexdigest()[:32]
+value=json.loads((root/f'manifests/worktrees/demo-member/{wid}.json').read_text())
 assert value['repository']=='demo-member'
 assert value['status']=='VALIDATED'
 assert value['scope']=='posix-installer-e2e'
+assert value['continuity']['mode']=='snapshot'
+for path in value['receiptPaths'].values(): assert (root/path).is_file()
+assert (root/value['session']).is_file()
 PY
+# A real linked sibling has no owning receipt and cannot borrow this one.
+git -C "$member" worktree add -b foreign "$root/foreign" >/dev/null
+bash "$root/foreign/.ai/context/context.sh" start >/dev/null
+if bash "$root/foreign/.ai/context/context.sh" verify >/dev/null 2>&1; then
+  printf 'FAIL foreign Worktree borrowed a receipt\n' >&2
+  exit 1
+fi
 printf 'PASS POSIX AI Context installer E2E\n'

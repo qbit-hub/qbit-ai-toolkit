@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.3.0 (prepared, not published)
+
+- Add native POSIX strict online Start/Status/Verify/Checkpoint with Python 3.10+, live canonical remote/branch SHA, actual Git root identity, fingerprint-v2 and 120-minute nonfuture evidence checks. Status is read-only health; Verify requires exact current-source milestone publication.
+- Publish Worktree-scoped Manifest/state/handoff, a new Session, byte-exact SHA-256-bound payload, Workstream and immutable validation rows in one commit. Preserve historical repository summaries, unknown-owner Workstreams and sibling receipts. Validate the existing Windows reviewed independent-root-enrollment contract without transferring legacy ownership.
+- Reconstruct exact interrupted operations under OS-released cache locks and atomic ignored journals. Reject source/payload races, forged or incomplete journals, Session reuse, foreign owners, unrelated dirty files and divergent writers; preserve both histories without force-push, reset or rebase.
+- Both installers manage/hash/repair/remove the shared Python module; POSIX installation and verification enforce launcher executable modes. Preserve the legacy engine/offline portability contract for installed 1.2.9 consumers, covered using a frozen original launcher fixture.
+- Add Windows-produced contract evidence, installed real-Git positive/negative/recovery tests, Bash install → Start → schema-v2 Checkpoint → Verify E2E and foreign-owner rejection. Gate native Ubuntu/macOS in CI. Independent Windows host and native CI acceptance remain separate from local fixture validation; no canonical publication or rollout is claimed.
+
 ## 1.2.9 (prepared, not published)
 
 - Isolate Windows current receipts by repository and normalized Worktree root; retain repository summaries for compatibility, preserve sibling cursors and bind global Workstream ownership to the publishing Worktree. Refuse ambiguous legacy mapping, missing scoped receipts and unsafe sibling takeovers; preserve append-only validation and exact journal replay across sibling publications.

@@ -3,7 +3,9 @@ set -euo pipefail
 
 here=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 central_root=$(CDPATH= cd -- "$here/.." && pwd -P)
-member_context_py="$central_root/templates/member/context.py"
+# Exercise the frozen 1.2.9 consumer against the current central legacy engine.
+# The new installed strict online contract has separate integration/E2E gates.
+member_context_py="$here/fixtures/member-1.2.9/context.py"
 member_context_sh="$central_root/templates/member/context.sh"
 
 pass=0

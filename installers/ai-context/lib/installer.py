@@ -5,6 +5,7 @@ import argparse
 import datetime as dt
 import hashlib
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -15,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 INSTALLER_ID = "installer.ai-context"
-INSTALLER_VERSION = "1.2.9"
+INSTALLER_VERSION = "1.3.0"
 STATE_PATH = ".qbit/toolkit/installed/ai-context.json"
 BLOCK_BEGIN = "<!-- qbit-toolkit:ai-context:start -->"
 BLOCK_END = "<!-- qbit-toolkit:ai-context:end -->"
@@ -196,6 +197,7 @@ def new_spec(mode: str, v: dict[str, str]) -> Spec:
     if mode == "member":
         for rel in ("context.ps1", "context.sh", "context.py", "context-transfer.ps1", "context-sync-gate.ps1"):
             files[f".ai/context/{rel}"] = read_template(f"templates/common/member/{rel}")
+        files[".ai/context/context_strict.py"] = read_template("templates/common/central/tooling/context_strict.py")
         files[".ai/context/config.json"] = render("templates/common/member/config.json.tpl", v)
         files[".ai/context/.gitignore"] = read_template("templates/common/member/context.gitignore")
         blocks["AGENTS.md"] = Block(BLOCK_BEGIN, BLOCK_END, render("templates/common/member/agents-block.md.tpl", v))
@@ -210,10 +212,13 @@ def new_spec(mode: str, v: dict[str, str]) -> Spec:
         files["tooling/context-lifecycle.ps1"] = read_template("templates/common/central/tooling/context-lifecycle.ps1")
         files["tooling/context-continuity.ps1"] = read_template("templates/common/central/tooling/context-continuity.ps1")
         files["tooling/context-lifecycle.py"] = read_template("templates/common/central/tooling/context-lifecycle.py")
+        files["tooling/context_strict.py"] = read_template("templates/common/central/tooling/context_strict.py")
+        files["templates/member/context_strict.py"] = read_template("templates/common/central/tooling/context_strict.py")
         for rel in ("context.ps1", "context.sh", "context.py", "context-transfer.ps1", "context-sync-gate.ps1"):
             files[f"templates/member/{rel}"] = read_template(f"templates/common/member/{rel}")
         files["tests/context-lifecycle.tests.ps1"] = read_template("templates/common/central/tests/context-lifecycle.tests.ps1")
         files["tests/context-lifecycle.tests.sh"] = read_template("templates/common/central/tests/context-lifecycle.tests.sh")
+        files["tests/fixtures/member-1.2.9/context.py"] = read_template("templates/common/central/tests/fixtures/member-1.2.9/context.py")
         files["schemas/checkpoint.schema.json"] = read_template("templates/common/central/schemas/checkpoint.schema.json")
         files["docs/context-automation.md"] = render("templates/common/central/docs/context-automation.md.tpl", v)
         blocks["AGENTS.md"] = Block(BLOCK_BEGIN, BLOCK_END, render("templates/common/central/agents-block.md.tpl", v))
@@ -392,7 +397,8 @@ def make_plan(root: Path, spec: Spec, state: dict[str, Any] | None, owned_modifi
         if not exists:
             actions.append(Action("file", "create", rel))
         elif current == expected:
-            pass
+            if executable(rel) and os.name != "nt" and path.stat().st_mode & 0o111 != 0o111:
+                actions.append(Action("file", "mode", rel))
         elif current == old_files[rel]:
             actions.append(Action("file", "update", rel))
         elif owned_modified == "replace":
@@ -469,25 +475,33 @@ def make_state(mode: str, project: str, repository: str, remote: str, branch: st
     }
 
 
+def executable(relative: str) -> bool:
+    return relative.endswith(".sh") or relative.endswith(("/context.py", "/context-lifecycle.py"))
+
+
 def mutate(root: Path, spec: Spec, state: dict[str, Any] | None, actions: list[Action], mode: str, project: str, repository: str, remote: str, branch: str) -> None:
     snapshots: dict[Path, bytes | None] = {}
+    modes: dict[Path, int] = {}
     seeded = list((state or {}).get("seededFiles", []))
 
     def snapshot(path: Path) -> None:
         if path not in snapshots:
             snapshots[path] = path.read_bytes() if path.is_file() else None
+            if path.is_file():
+                modes[path] = path.stat().st_mode
 
     try:
         priority = {"seed": 0, "file": 1, "block": 2}
         for item in sorted(actions, key=lambda action: (priority[action.kind], action.path)):
             path = safe_path(root, item.path)
             if item.kind == "file":
-                if item.action == "adopt":
-                    continue
                 snapshot(path)
                 if item.action == "replace":
                     backup(root, item.path)
-                write_utf8(path, spec.files[item.path])
+                if item.action not in {"adopt", "mode"}:
+                    write_utf8(path, spec.files[item.path])
+                if executable(item.path) and os.name != "nt":
+                    path.chmod(path.stat().st_mode | 0o111)
             elif item.kind == "block":
                 if item.action == "adopt":
                     continue
@@ -514,6 +528,8 @@ def mutate(root: Path, spec: Spec, state: dict[str, Any] | None, actions: list[A
             else:
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_bytes(data)
+                if path in modes:
+                    path.chmod(modes[path])
         raise
 
 
@@ -528,6 +544,8 @@ def verify(root: Path) -> dict[str, Any]:
             errors.append(f"Missing managed file: {item['path']}")
         elif file_hash(path) != item["sha256"]:
             errors.append(f"Managed file hash mismatch: {item['path']}")
+        elif os.name != "nt" and state["installerVersion"] == "1.3.0" and executable(item["path"]) and path.stat().st_mode & 0o111 != 0o111:
+            errors.append(f"Managed executable mode mismatch: {item['path']}")
     for item in state["managedBlocks"]:
         path = safe_path(root, item["path"])
         info = block_info(path, Block(item["begin"], item["end"], ""))

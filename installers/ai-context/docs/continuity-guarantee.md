@@ -1,6 +1,10 @@
-# Windows continuity verification contract (1.2.9 candidate)
+# Continuity verification contract (1.3.0 candidate)
 
-This is a fail-closed milestone contract, not a promise of uninterrupted network access. Windows PowerShell 5.1 and PowerShell 7 are tested hosts. The strict gate and the new journal/fingerprint hardening are Windows implementations; native Linux/macOS equivalence has not been certified. Existing POSIX portability support is not evidence of strict parity.
+This is a fail-closed milestone contract, not a promise of uninterrupted network access. The Windows gate retains its existing implementation. The POSIX online gate uses Python 3.10+ and Bash, with dedicated installed Git fixtures and Ubuntu/macOS CI gates. Native CI and independent Windows host acceptance of this candidate must be reported separately from local fixture results.
+
+POSIX commands are `bash .ai/context/context.sh start|status|verify|checkpoint`. Install/update both central and member assets first. Status is a read-only health check; Verify requires a prior healthy Start and the exact current-source checkpoint publication. A complete schema-v2 payload and `behavior.pushContext: true` are mandatory for online Checkpoint. Evidence must be at most 120 minutes old and cannot be future dated. Offline transfer remains the existing schema-1 POSIX workflow and cannot pass online Verify.
+
+The POSIX journal is `.ai-bridge/context-checkpoint-pending.json`. Preserve it with the original payload and cache on failure. Retry the same Checkpoint only at the same source/payload/owner/remote/branch. Expected publication bytes are reconstructed under an OS-released cache lock, and exact prepared/committed/completed retries reuse one operation and Session. Divergence, changed input, incomplete or forged journals and foreign owners fail with `CONTEXT_UNSYNCED` / exit 3; no reset/rebase/force-push recovery is attempted. Successful POSIX publication retains byte-exact payload evidence under `checkpoints/worktrees/` and Worktree-scoped receipts; historical repository summaries remain unchanged.
 
 ## Commands
 

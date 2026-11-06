@@ -25,6 +25,8 @@ class AiContextCiContractTests(unittest.TestCase):
     def test_required_posix_validation_layers_are_ci_gates(self) -> None:
         required_commands = (
             "python installers/ai-context/tests/unit/test-unit.py",
+            "python installers/ai-context/tests/unit/test-strict-posix.py",
+            "python installers/ai-context/tests/integration/test-strict-posix.py",
             "bash installers/ai-context/tests/integration/test-installer.sh",
             "bash installers/ai-context/tests/integration/test-legacy-migration.sh",
             "bash installers/ai-context/tests/e2e/test-e2e.sh",

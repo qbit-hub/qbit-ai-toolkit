@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import datetime as dt
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -11,6 +12,8 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import Any
+
+sys.dont_write_bytecode = True
 
 TRANSFER_KIND = "qbit-ai-context-transfer"
 OFFLINE_KIND = "qbit-ai-context-offline"
@@ -29,7 +32,7 @@ def run_git(root: Path | None, args: list[str], allow_failure: bool = False) -> 
 
 
 def normalize_remote(value: str, repo_root: Path) -> str:
-    if re.match(r"^[A-Za-z][A-Za-z0-9+.-]*://", value):
+    if re.match(r"^[A-Za-z][A-Za-z0-9+.-]*://", value) or re.match(r"^[^/\\\s]+@[^:]+:", value):
         return value.rstrip("/")
     path = Path(value)
     if not path.is_absolute():
@@ -389,10 +392,50 @@ def refresh_online_cache(repo_root: Path, cache_path: Path, remote: str, branch:
             print("WARNING: AI context cache diverged from origin; destructive synchronization was refused. Local context will be loaded read-only.", file=sys.stderr)
 
 
+def strict_online(action, repo_root, config_path, config):
+    import context_strict as strict
+    cache, _, _ = strict.configuration(repo_root, config)
+    if action == "start":
+        strict.refresh(repo_root, cache, config)
+    # The member validator is installer-owned; the trusted central engine must
+    # also support this contract. An old central cannot silently downgrade it.
+    tool = strict.safe_path(cache, "tooling/context-lifecycle.py")
+    strict.require(strict.safe_path(cache, "tooling/context_strict.py").is_file(),
+                   "central strict POSIX tooling missing; update the central installer")
+    spec = importlib.util.spec_from_file_location("central_lifecycle", tool)
+    lifecycle = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = lifecycle
+    spec.loader.exec_module(lifecycle)
+    def engine(mode):
+        command = [sys.executable, "-B", str(tool), "--strict", "--action", mode,
+                   "--repository-root", str(repo_root), "--config-path", str(config_path)]
+        strict.require(subprocess.run(command).returncode == 0, "central lifecycle failed; evidence preserved")
+    if action == "start":
+        engine("start")
+        strict.assert_runtime(repo_root, cache, config, lifecycle)
+    elif action == "status":
+        strict.assert_runtime(repo_root, cache, config, lifecycle)
+        print("CONTEXT_STATUS_OK: milestone checkpoint not verified")
+        return 0
+    elif action == "verify":
+        strict.assert_runtime(repo_root, cache, config, lifecycle)
+        strict.refresh(repo_root, cache, config)
+        engine("status")
+        strict.assert_runtime(repo_root, cache, config, lifecycle)
+        strict.verify_published(lifecycle, repo_root, cache, config)
+    else:
+        # The engine owns retry validation under its exclusive cache lock.
+        engine("checkpoint")
+        strict.assert_runtime(repo_root, cache, config, lifecycle)
+        strict.verify_published(lifecycle, repo_root, cache, config)
+    print(f"CONTEXT_SYNC_OK: {action.title()} {config['repository']}")
+    return 0
+
+
 def main() -> int:
-    action = sys.argv[1] if len(sys.argv) > 1 else "start"
-    if action not in {"start", "status", "checkpoint", "audit", "export", "import", "reconnect"}:
-        raise RuntimeError("Action must be start, status, checkpoint, audit, export, import, or reconnect.")
+    action = (sys.argv[1] if len(sys.argv) > 1 else "start").lower()
+    if action not in {"start", "status", "verify", "checkpoint", "audit", "export", "import", "reconnect"}:
+        raise RuntimeError("Unknown AI context lifecycle action.")
     if shutil.which("git") is None:
         raise RuntimeError("Git is required for AI context lifecycle.")
 
@@ -406,6 +449,9 @@ def main() -> int:
         raise RuntimeError("Unsupported AI context config schemaVersion.")
 
     context = config.get("context") or {}
+    # Validate paths before legacy portability actions can resolve away links.
+    import context_strict
+    context_strict.configuration(repo_root, config)
     configured_remote = str(context.get("remote") or "")
     branch = str(context.get("branch") or "")
     cache_relative = str(context.get("cachePath") or "")
@@ -435,6 +481,9 @@ def main() -> int:
     if action == "reconnect":
         reconnect_offline(repo_root, cache_path, config, branch, remote)
         return 0
+
+    if action == "verify" or (action in {"start", "status", "checkpoint"} and not marker_path(repo_root).exists()):
+        return strict_online(action, repo_root, config_path, config)
 
     offline_marker = load_offline_marker(repo_root, cache_path, config, branch, remote)
     if offline_marker is None:
@@ -469,5 +518,6 @@ if __name__ == "__main__":
     try:
         raise SystemExit(main())
     except Exception as exc:
-        print(str(exc), file=sys.stderr)
-        raise SystemExit(12)
+        message = str(exc) if str(exc).startswith("CONTEXT_UNSYNCED:") else "CONTEXT_UNSYNCED: invalid configuration, runtime or checkpoint; preserve evidence for diagnosis"
+        print(message, file=sys.stderr)
+        raise SystemExit(3)
